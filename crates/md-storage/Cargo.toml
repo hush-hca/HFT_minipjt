@@ -7,3 +7,10 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+arrow-array = "56"
+arrow-ipc = "56"
+arrow-schema = "56"
+chrono = "0.4"
+md-core = { path = "../md-core" }
+thiserror = "2"
+uuid = "1"
