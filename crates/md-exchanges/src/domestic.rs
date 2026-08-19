@@ -28,6 +28,8 @@ pub enum ParseError {
     },
     #[error("unknown event type `{event_type}`")]
     UnknownEventType { event_type: String },
+    #[error("unsupported source stream `{stream}`")]
+    UnsupportedStream { stream: String },
     #[error("invalid decimal in `{field}`: {source}")]
     Decimal {
         field: &'static str,
