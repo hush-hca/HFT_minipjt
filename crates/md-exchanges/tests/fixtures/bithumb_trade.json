@@ -1,0 +1,16 @@
+{
+  "type": "trade",
+  "code": "KRW-BTC",
+  "trade_price": 489700,
+  "trade_volume": 1.4825,
+  "ask_bid": "BID",
+  "prev_closing_price": 484500,
+  "change": "RISE",
+  "change_price": 5200,
+  "trade_date": "2024-09-10",
+  "trade_time": "09:58:54",
+  "trade_timestamp": 1725929934373,
+  "sequential_id": 17259299343730000,
+  "timestamp": 1725929934483,
+  "stream_type": "REALTIME"
+}

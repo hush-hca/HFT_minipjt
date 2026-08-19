@@ -1,0 +1,26 @@
+{
+  "type": "orderbook",
+  "code": "KRW-BTC",
+  "total_ask_size": 120.0,
+  "total_bid_size": 120.0,
+  "orderbook_units": [
+    {"ask_price": 489800, "bid_price": 489700, "ask_size": 1.01, "bid_size": 1.02},
+    {"ask_price": 489900, "bid_price": 489600, "ask_size": 2.01, "bid_size": 2.02},
+    {"ask_price": 490000, "bid_price": 489500, "ask_size": 3.01, "bid_size": 3.02},
+    {"ask_price": 490100, "bid_price": 489400, "ask_size": 4.01, "bid_size": 4.02},
+    {"ask_price": 490200, "bid_price": 489300, "ask_size": 5.01, "bid_size": 5.02},
+    {"ask_price": 490300, "bid_price": 489200, "ask_size": 6.01, "bid_size": 6.02},
+    {"ask_price": 490400, "bid_price": 489100, "ask_size": 7.01, "bid_size": 7.02},
+    {"ask_price": 490500, "bid_price": 489000, "ask_size": 8.01, "bid_size": 8.02},
+    {"ask_price": 490600, "bid_price": 488900, "ask_size": 9.01, "bid_size": 9.02},
+    {"ask_price": 490700, "bid_price": 488800, "ask_size": 10.01, "bid_size": 10.02},
+    {"ask_price": 490800, "bid_price": 488700, "ask_size": 11.01, "bid_size": 11.02},
+    {"ask_price": 490900, "bid_price": 488600, "ask_size": 12.01, "bid_size": 12.02},
+    {"ask_price": 491000, "bid_price": 488500, "ask_size": 13.01, "bid_size": 13.02},
+    {"ask_price": 491100, "bid_price": 488400, "ask_size": 14.01, "bid_size": 14.02},
+    {"ask_price": 491200, "bid_price": 488300, "ask_size": 15.01, "bid_size": 15.02}
+  ],
+  "level": 1,
+  "timestamp": 1725929934483000,
+  "stream_type": "REALTIME"
+}
