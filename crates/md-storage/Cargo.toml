@@ -12,8 +12,10 @@ arrow-ipc = "56"
 arrow-schema = "56"
 chrono = "0.4"
 md-core = { path = "../md-core" }
+serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 uuid = "1"
 
 [dev-dependencies]
+tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

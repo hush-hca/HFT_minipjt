@@ -133,12 +133,14 @@ impl CollectorConfig {
                     "adapter {name:?} quote must contain only uppercase ASCII letters and digits"
                 ));
             }
-            if !has_nonempty_url_target(&adapter.rest_url, "https://") {
-                return invalid(format!("adapter {name:?} rest_url must use HTTPS"));
-            }
-            if !has_nonempty_url_target(&adapter.websocket_url, "wss://") {
+            if !allowed_endpoint(&adapter.rest_url, "https", "http") {
                 return invalid(format!(
-                    "adapter {name:?} websocket_url must use secure WebSockets"
+                    "adapter {name:?} rest_url must use HTTPS (HTTP is allowed only for loopback)"
+                ));
+            }
+            if !allowed_endpoint(&adapter.websocket_url, "wss", "ws") {
+                return invalid(format!(
+                    "adapter {name:?} websocket_url must use secure WebSockets (WS is allowed only for loopback)"
                 ));
             }
             if adapter.proactive_reconnect_secs == Some(0) {
@@ -163,10 +165,23 @@ fn is_uppercase_identifier(value: &str) -> bool {
             .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
 }
 
-fn has_nonempty_url_target(value: &str, scheme: &str) -> bool {
-    value
-        .strip_prefix(scheme)
-        .is_some_and(|remainder| !remainder.is_empty())
+fn allowed_endpoint(value: &str, secure_scheme: &str, loopback_scheme: &str) -> bool {
+    let Ok(url) = url::Url::parse(value) else {
+        return false;
+    };
+    if url.cannot_be_a_base() || url.host_str().is_none() {
+        return false;
+    }
+    if url.scheme() == secure_scheme {
+        return true;
+    }
+    url.scheme() == loopback_scheme
+        && url.host_str().is_some_and(|host| {
+            host.eq_ignore_ascii_case("localhost")
+                || host
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|address| address.is_loopback())
+        })
 }
 
 #[cfg(test)]
@@ -230,6 +245,21 @@ mod tests {
         let mut insecure = valid_config();
         insecure.adapters.get_mut("upbit_spot").unwrap().rest_url = "http://example.com".into();
         assert!(insecure.validate().is_err());
+    }
+
+    #[test]
+    fn allows_insecure_protocols_only_on_loopback_for_deterministic_tests() {
+        let mut config = valid_config();
+        {
+            let adapter = config.adapters.get_mut("upbit_spot").unwrap();
+            adapter.rest_url = "http://127.0.0.1:8080/markets".into();
+            adapter.websocket_url = "ws://localhost:8081/stream".into();
+        }
+        assert!(config.validate().is_ok());
+
+        config.adapters.get_mut("upbit_spot").unwrap().rest_url =
+            "http://example.com/markets".into();
+        assert!(config.validate().is_err());
     }
 
     #[test]

@@ -2,6 +2,7 @@ mod batch;
 mod partition;
 mod recovery;
 mod schema;
+mod validate;
 
 pub use batch::{BookBatchBuilder, StorageError, TradeBatchBuilder};
 pub use partition::{PartitionKey, PartitionRouter, StorageConfig};
@@ -11,3 +12,4 @@ pub use schema::{
     TAKER_SIDE_SELL, TAKER_SIDE_UNKNOWN, TIMESTAMP_PRECISION_MICROSECOND,
     TIMESTAMP_PRECISION_MILLISECOND, TIMESTAMP_PRECISION_UNAVAILABLE, book_schema, trade_schema,
 };
+pub use validate::{DatasetError, ValidationIssue, ValidationReport, validate_path};

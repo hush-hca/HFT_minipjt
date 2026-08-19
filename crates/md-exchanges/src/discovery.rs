@@ -159,10 +159,19 @@ pub fn build_combined_stream_url(
         url: base_url.to_owned(),
         message: error.to_string(),
     })?;
-    if url.scheme() != "wss" || url.cannot_be_a_base() || url.fragment().is_some() {
+    let secure = url.scheme() == "wss";
+    let loopback_ws = url.scheme() == "ws"
+        && url.host_str().is_some_and(|host| {
+            host.eq_ignore_ascii_case("localhost")
+                || host
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|address| address.is_loopback())
+        });
+    if (!secure && !loopback_ws) || url.cannot_be_a_base() || url.fragment().is_some() {
         return Err(SubscriptionError::InvalidUrl {
             url: base_url.to_owned(),
-            message: "expected a hierarchical wss URL without a fragment".to_owned(),
+            message: "expected a hierarchical wss URL (or loopback ws URL) without a fragment"
+                .to_owned(),
         });
     }
     url.set_query(None);
