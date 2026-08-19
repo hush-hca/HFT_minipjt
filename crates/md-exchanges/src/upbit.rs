@@ -11,6 +11,7 @@ use crate::{
 const VENUE: DomesticVenue = DomesticVenue {
     adapter: AdapterId::UpbitSpot,
     book_timestamp_precision: TimestampPrecision::Millisecond,
+    omit_zero_size_book_levels: false,
 };
 
 /// Parses one Upbit DEFAULT or SIMPLE WebSocket market-data frame.

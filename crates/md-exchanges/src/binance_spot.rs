@@ -12,6 +12,7 @@ use crate::{
 const VENUE: BinanceVenue = BinanceVenue {
     adapter: AdapterId::BinanceSpot,
     require_book_symbol: false,
+    ignore_zero_trade_sentinel: false,
 };
 
 /// Parses one Binance Spot combined-stream trade or partial-depth frame.

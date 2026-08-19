@@ -12,6 +12,7 @@ use crate::{
 const VENUE: BinanceVenue = BinanceVenue {
     adapter: AdapterId::BinanceUsdm,
     require_book_symbol: true,
+    ignore_zero_trade_sentinel: true,
 };
 
 /// Parses one Binance USDⓈ-M combined-stream trade or partial-depth frame.

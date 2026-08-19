@@ -1,0 +1,10 @@
+{
+  "type": "orderbook",
+  "code": "KRW-BTC",
+  "orderbook_units": [
+    {"ask_price": 101, "bid_price": 99, "ask_size": 1, "bid_size": 1},
+    {"ask_price": 102, "bid_price": 98, "ask_size": 0, "bid_size": 2},
+    {"ask_price": 103, "bid_price": 97, "ask_size": 3, "bid_size": 0}
+  ],
+  "timestamp": 1725929934483000
+}

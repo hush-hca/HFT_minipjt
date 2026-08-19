@@ -18,6 +18,8 @@ const QUOTE: &str = "USDT";
 pub(crate) struct BinanceVenue {
     pub adapter: AdapterId,
     pub require_book_symbol: bool,
+    /// USD-M has been observed emitting marked raw-trade control frames with zero values.
+    pub ignore_zero_trade_sentinel: bool,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -45,7 +47,11 @@ pub(crate) fn parse_frame(
 
     let event = match kind {
         StreamKind::Trade => {
-            parse_trade(data, stream, stream_symbol, recv_us, raw_size_bytes, venue)?
+            let event = parse_trade(data, stream, stream_symbol, recv_us, raw_size_bytes, venue)?;
+            if venue.ignore_zero_trade_sentinel && is_zero_trade_sentinel(data, &event)? {
+                return Ok(Vec::new());
+            }
+            event
         }
         StreamKind::Depth20 => {
             parse_book(data, stream, stream_symbol, recv_us, raw_size_bytes, venue)?
@@ -53,6 +59,19 @@ pub(crate) fn parse_frame(
     };
     validate_event(&event)?;
     Ok(vec![event])
+}
+
+fn is_zero_trade_sentinel(
+    data: &simd_json::value::borrowed::Object<'_>,
+    event: &NormalizedEvent,
+) -> Result<bool, ParseError> {
+    let NormalizedEvent::Trade(trade) = event else {
+        return Ok(false);
+    };
+    Ok(optional_string(data, "X")? == Some("NA")
+        && optional_u64(data, "st")? == Some(1)
+        && trade.price == 0
+        && trade.quantity == 0)
 }
 
 fn parse_stream(stream: &str) -> Result<(&str, StreamKind), ParseError> {

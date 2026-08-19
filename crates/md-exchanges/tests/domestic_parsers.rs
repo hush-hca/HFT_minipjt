@@ -82,6 +82,21 @@ fn bithumb_book_expands_all_available_levels() {
 }
 
 #[test]
+fn bithumb_book_omits_zero_size_placeholders_per_side() {
+    let mut bytes = include_bytes!("fixtures/bithumb_book_zero_sizes.json").to_vec();
+    let events = md_exchanges::bithumb::parse_frame(&mut bytes, RECV_US).unwrap();
+    let NormalizedEvent::Book(book) = &events[0] else {
+        panic!("expected book")
+    };
+
+    assert_eq!(book.asks.len(), 2);
+    assert_eq!(book.bids.len(), 2);
+    assert_eq!(book.asks[1].price, parse_decimal_18("103").unwrap());
+    assert_eq!(book.bids[1].price, parse_decimal_18("98").unwrap());
+    validate_event(&events[0]).unwrap();
+}
+
+#[test]
 fn bithumb_trade_maps_side_sequence_and_times() {
     let mut bytes = include_bytes!("fixtures/bithumb_trade.json").to_vec();
     let events = md_exchanges::bithumb::parse_frame(&mut bytes, RECV_US).unwrap();

@@ -11,6 +11,7 @@ use crate::{
 const VENUE: DomesticVenue = DomesticVenue {
     adapter: AdapterId::BithumbSpot,
     book_timestamp_precision: TimestampPrecision::Microsecond,
+    omit_zero_size_book_levels: true,
 };
 
 /// Parses one Bithumb DEFAULT or SIMPLE WebSocket market-data frame.

@@ -230,17 +230,22 @@ pub(crate) fn parse_binance_active_markets(
             market.status == "TRADING"
                 && (!require_perpetual || market.contract_type.as_deref() == Some("PERPETUAL"))
         })
-        .map(|market| {
+        .filter_map(|market| {
             if !valid_symbol_component(&market.base_asset)
                 || !valid_symbol_component(&market.quote_asset)
-                || market.symbol != format!("{}{}", market.base_asset, market.quote_asset)
             {
-                return Err(DiscoveryError::InvalidMarket {
+                return None;
+            }
+            if market.symbol != format!("{}{}", market.base_asset, market.quote_asset) {
+                return Some(Err(DiscoveryError::InvalidMarket {
                     adapter,
                     market: market.symbol,
-                });
+                }));
             }
-            Ok(CanonicalSymbol::new(market.base_asset, market.quote_asset))
+            Some(Ok(CanonicalSymbol::new(
+                market.base_asset,
+                market.quote_asset,
+            )))
         })
         .collect()
 }

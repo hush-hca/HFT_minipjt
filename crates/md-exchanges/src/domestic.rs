@@ -52,6 +52,7 @@ pub enum ParseError {
 pub(crate) struct DomesticVenue {
     pub adapter: AdapterId,
     pub book_timestamp_precision: TimestampPrecision,
+    pub omit_zero_size_book_levels: bool,
 }
 
 pub(crate) fn parse_frame(
@@ -115,14 +116,21 @@ fn parse_book(
             field: "orderbook_units[]",
             expected: "an object",
         })?;
-        asks.push(PriceLevel {
-            price: required_decimal(unit, &["ask_price", "ap"], "ask_price")?,
-            quantity: required_decimal(unit, &["ask_size", "as"], "ask_size")?,
-        });
-        bids.push(PriceLevel {
-            price: required_decimal(unit, &["bid_price", "bp"], "bid_price")?,
-            quantity: required_decimal(unit, &["bid_size", "bs"], "bid_size")?,
-        });
+        let ask_quantity = required_decimal(unit, &["ask_size", "as"], "ask_size")?;
+        if !venue.omit_zero_size_book_levels || ask_quantity != 0 {
+            asks.push(PriceLevel {
+                price: required_decimal(unit, &["ask_price", "ap"], "ask_price")?,
+                quantity: ask_quantity,
+            });
+        }
+
+        let bid_quantity = required_decimal(unit, &["bid_size", "bs"], "bid_size")?;
+        if !venue.omit_zero_size_book_levels || bid_quantity != 0 {
+            bids.push(PriceLevel {
+                price: required_decimal(unit, &["bid_price", "bp"], "bid_price")?,
+                quantity: bid_quantity,
+            });
+        }
     }
 
     Ok(NormalizedEvent::Book(BookSnapshot {

@@ -1,8 +1,9 @@
 use md_core::{
     decimal::parse_decimal_18,
     model::{AdapterId, CanonicalSymbol, NormalizedEvent, TakerSide, TimestampPrecision},
-    validation::validate_event,
+    validation::{ValidationError, validate_event},
 };
+use md_exchanges::ParseError;
 
 const RECV_US: i64 = 1_672_515_782_200_000;
 
@@ -104,6 +105,44 @@ fn usdm_partial_book_preserves_event_transaction_times_and_twenty_levels() {
     assert_eq!(book.bids.len(), 20);
     assert_eq!(book.asks.len(), 20);
     validate_event(&event).unwrap();
+}
+
+#[test]
+fn usdm_ignores_zero_trade_sentinel() {
+    let mut bytes = include_bytes!("fixtures/binance_usdm_trade_sentinel.json").to_vec();
+
+    let events = md_exchanges::binance_usdm::parse_frame(&mut bytes, RECV_US).unwrap();
+
+    assert!(events.is_empty());
+}
+
+#[test]
+fn spot_does_not_ignore_usdm_zero_trade_sentinel() {
+    let mut bytes = include_bytes!("fixtures/binance_usdm_trade_sentinel.json").to_vec();
+
+    let error = md_exchanges::binance_spot::parse_frame(&mut bytes, RECV_US).unwrap_err();
+
+    assert!(matches!(
+        error,
+        ParseError::Validation(ValidationError::NonPositiveTradePrice { value: 0 })
+    ));
+}
+
+#[test]
+fn usdm_rejects_unmarked_zero_trade() {
+    let mut bytes = br#"{
+        "stream":"ethusdt@trade",
+        "data":{"e":"trade","E":1672515782140,"T":1672515782140,
+        "s":"ETHUSDT","t":98765,"p":"0","q":"0","m":false}
+    }"#
+    .to_vec();
+
+    let error = md_exchanges::binance_usdm::parse_frame(&mut bytes, RECV_US).unwrap_err();
+
+    assert!(matches!(
+        error,
+        ParseError::Validation(ValidationError::NonPositiveTradePrice { value: 0 })
+    ));
 }
 
 #[test]

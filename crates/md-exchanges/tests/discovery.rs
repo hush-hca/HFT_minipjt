@@ -103,6 +103,99 @@ fn binance_discovery_excludes_inactive_and_non_perpetual_symbols() {
 }
 
 #[test]
+fn binance_discovery_ignores_unrepresentable_unrelated_markets() {
+    let mut spot = r#"{
+        "symbols": [
+            {
+                "symbol": "币安人生USDT",
+                "status": "TRADING",
+                "baseAsset": "币安人生",
+                "quoteAsset": "USDT"
+            },
+            {
+                "symbol": "BAD/USDT",
+                "status": "TRADING",
+                "baseAsset": "BAD/",
+                "quoteAsset": "USDT"
+            },
+            {
+                "symbol": "BTCUSDT",
+                "status": "TRADING",
+                "baseAsset": "BTC",
+                "quoteAsset": "USDT"
+            }
+        ]
+    }"#
+    .as_bytes()
+    .to_vec();
+
+    let result = discovery_from_payload(AdapterId::BinanceSpot, &config(false), &mut spot).unwrap();
+    assert_eq!(result.available, [CanonicalSymbol::new("BTC", "USDT")]);
+    assert_eq!(
+        result.missing,
+        ["ETH", "XRP", "SOL"].map(|base| CanonicalSymbol::new(base, "USDT"))
+    );
+
+    let mut usdm = r#"{
+        "symbols": [
+            {
+                "symbol": "币安人生USDT",
+                "status": "TRADING",
+                "baseAsset": "币安人生",
+                "quoteAsset": "USDT",
+                "contractType": "PERPETUAL"
+            },
+            {
+                "symbol": "BTCUSDT_250926",
+                "status": "TRADING",
+                "baseAsset": "BTC",
+                "quoteAsset": "USDT",
+                "contractType": "CURRENT_QUARTER"
+            },
+            {
+                "symbol": "ETHUSDT",
+                "status": "TRADING",
+                "baseAsset": "ETH",
+                "quoteAsset": "USDT",
+                "contractType": "PERPETUAL"
+            }
+        ]
+    }"#
+    .as_bytes()
+    .to_vec();
+
+    let result = discovery_from_payload(AdapterId::BinanceUsdm, &config(false), &mut usdm).unwrap();
+    assert_eq!(result.available, [CanonicalSymbol::new("ETH", "USDT")]);
+    assert_eq!(
+        result.missing,
+        ["BTC", "XRP", "SOL"].map(|base| CanonicalSymbol::new(base, "USDT"))
+    );
+}
+
+#[test]
+fn binance_discovery_still_rejects_inconsistent_representable_markets() {
+    let mut payload = br#"{
+        "symbols": [{
+            "symbol": "BROKEN",
+            "status": "TRADING",
+            "baseAsset": "BTC",
+            "quoteAsset": "USDT"
+        }]
+    }"#
+    .to_vec();
+
+    let error =
+        discovery_from_payload(AdapterId::BinanceSpot, &config(false), &mut payload).unwrap_err();
+    assert!(matches!(
+        error,
+        DiscoveryError::InvalidMarket {
+            adapter: AdapterId::BinanceSpot,
+            market
+        } if market == "BROKEN"
+    ));
+}
+
+#[test]
 fn strict_mode_error_names_every_missing_pair() {
     let mut payload = fixture("binance_spot_markets.json");
     let error =
