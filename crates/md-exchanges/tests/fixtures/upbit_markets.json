@@ -1,0 +1,5 @@
+[
+  {"market":"KRW-BTC","korean_name":"비트코인","english_name":"Bitcoin","market_event":{"warning":false}},
+  {"market":"KRW-ETH","korean_name":"이더리움","english_name":"Ethereum","market_event":{"warning":false}},
+  {"market":"BTC-XRP","korean_name":"리플","english_name":"XRP","market_event":{"warning":false}}
+]

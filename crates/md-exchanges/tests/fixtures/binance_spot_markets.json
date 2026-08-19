@@ -1,0 +1,10 @@
+{
+  "timezone":"UTC",
+  "serverTime":1725929934483,
+  "symbols":[
+    {"symbol":"BTCUSDT","status":"TRADING","baseAsset":"BTC","quoteAsset":"USDT"},
+    {"symbol":"ETHUSDT","status":"TRADING","baseAsset":"ETH","quoteAsset":"USDT"},
+    {"symbol":"XRPUSDT","status":"BREAK","baseAsset":"XRP","quoteAsset":"USDT"},
+    {"symbol":"BTCEUR","status":"TRADING","baseAsset":"BTC","quoteAsset":"EUR"}
+  ]
+}
