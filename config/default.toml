@@ -1,0 +1,43 @@
+output_root = "data"
+assets = [
+  "BTC", "ETH", "XRP", "SOL", "DOGE", "ADA", "AVAX", "LINK", "DOT",
+  "BCH", "LTC", "ETC", "TRX", "XLM", "ATOM", "NEAR", "APT", "SUI",
+  "ARB", "OP"
+]
+strict_symbols = false
+channel_capacity = 65536
+batch_rows = 8192
+flush_interval_ms = 1000
+enqueue_timeout_ms = 5000
+stats_interval_secs = 10
+
+[retry]
+initial_ms = 1000
+max_ms = 30000
+reset_after_secs = 300
+
+[adapters.upbit_spot]
+enabled = true
+quote = "KRW"
+rest_url = "https://api.upbit.com/v1/market/all"
+websocket_url = "wss://api.upbit.com/websocket/v1"
+
+[adapters.bithumb_spot]
+enabled = true
+quote = "KRW"
+rest_url = "https://api.bithumb.com/v1/market/all"
+websocket_url = "wss://ws-api.bithumb.com/websocket/v1"
+
+[adapters.binance_spot]
+enabled = true
+quote = "USDT"
+rest_url = "https://api.binance.com/api/v3/exchangeInfo"
+websocket_url = "wss://stream.binance.com:9443/stream"
+proactive_reconnect_secs = 82800
+
+[adapters.binance_usdm]
+enabled = true
+quote = "USDT"
+rest_url = "https://fapi.binance.com/fapi/v1/exchangeInfo"
+websocket_url = "wss://fstream.binance.com/stream"
+proactive_reconnect_secs = 82800

@@ -1,0 +1,10 @@
+[workspace]
+members = ["crates/md-core", "crates/md-exchanges", "crates/md-storage", "crates/collector"]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.85"
+version = "0.1.0"
+license = "MIT"
+publish = false

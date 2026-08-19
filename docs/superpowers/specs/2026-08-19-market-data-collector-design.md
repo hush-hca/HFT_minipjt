@@ -14,7 +14,7 @@ This phase creates trustworthy strategy input. It does not implement, backtest, 
 
 - Use Rust and Tokio asynchronous tasks for all live WebSocket feeds.
 - Parse JSON with the Rust `simd-json` crate.
-- Subscribe to order-book snapshots and non-aggregated trade ticks for 21 requested assets.
+- Subscribe to order-book snapshots and non-aggregated trade ticks for 20 requested assets.
 - Preserve exchange trade/engine time, exchange event/publication time, and local receive time independently where the source supplies them.
 - Store all normalized timestamps as Unix epoch microseconds while retaining the precision of each source field.
 - Persist data by exchange, market, symbol, UTC date, and UTC hour in Arrow IPC stream format.
@@ -272,7 +272,7 @@ Collect from every reachable configured market for at least 60 seconds, reopen t
 ## 17. Deliverables
 
 - Complete Cargo workspace source
-- Default configuration for all 21 assets and four markets
+- Default configuration for all 20 assets and four markets
 - Parsing fixtures and automated tests
 - README and architecture documentation
 - A sample live-smoke validation report and small generated Arrow sample when network access permits

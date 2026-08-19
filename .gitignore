@@ -1,0 +1,7 @@
+/data/
+/target/
+*.arrow
+*.arrow.partial
+/outputs/live-smoke/
+/outputs/smoke-report.json
+/work/

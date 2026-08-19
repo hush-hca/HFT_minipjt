@@ -121,7 +121,7 @@ fn default_config_has_required_assets_and_limits() {
     let cfg = md_core::config::CollectorConfig::load(
         std::path::Path::new("../../config/default.toml"),
     ).unwrap();
-    assert_eq!(cfg.assets.len(), 21);
+    assert_eq!(cfg.assets.len(), 20);
     assert_eq!(cfg.channel_capacity, 65_536);
     assert_eq!(cfg.batch_rows, 8_192);
     assert_eq!(cfg.flush_interval_ms, 1_000);
@@ -174,7 +174,7 @@ pub struct AdapterConfig {
 }
 ```
 
-`validate` rejects duplicate/non-uppercase assets, empty paths, zero queue/batch/timeout values, retry initial greater than retry maximum, missing adapter entries, non-HTTPS REST URLs, and non-WSS WebSocket URLs. Populate `config/default.toml` with the exact 21 assets and endpoints from the spec. Ignore `data/`, `target/`, `*.arrow`, `*.arrow.partial`, and smoke output in `.gitignore`.
+`validate` rejects duplicate/non-uppercase assets, empty paths, zero queue/batch/timeout values, retry initial greater than retry maximum, missing adapter entries, non-HTTPS REST URLs, and non-WSS WebSocket URLs. Populate `config/default.toml` with the exact 20 assets and endpoints from the spec. Ignore `data/`, `target/`, `*.arrow`, `*.arrow.partial`, and smoke output in `.gitignore`.
 
 ```toml
 output_root = "data"
