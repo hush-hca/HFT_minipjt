@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::{io, path::PathBuf};
 
 use arrow_array::builder::FixedSizeBinaryBuilder;
 use arrow_array::{
@@ -37,6 +38,22 @@ pub enum StorageError {
     TooManyLevels { levels: usize },
     #[error("{field} value {value} exceeds Decimal128 precision 38")]
     DecimalOutOfRange { field: &'static str, value: i128 },
+    #[error(transparent)]
+    Io(#[from] io::Error),
+    #[error(transparent)]
+    Recovery(#[from] crate::recovery::RecoveryError),
+    #[error("invalid partition component {component:?}")]
+    InvalidPartitionComponent { component: String },
+    #[error("timestamp {value} cannot be represented as UTC")]
+    InvalidPartitionTimestamp { value: i64 },
+    #[error("storage batch_rows must be greater than zero")]
+    InvalidBatchRows,
+    #[error("storage flush_interval must be greater than zero")]
+    InvalidFlushInterval,
+    #[error("existing finalized Arrow stream is unreadable: {path}: {message}")]
+    UnreadableFinal { path: PathBuf, message: String },
+    #[error("Arrow stream schema mismatch while merging {path}")]
+    MergeSchemaMismatch { path: PathBuf },
 }
 
 #[derive(Debug, Default)]
