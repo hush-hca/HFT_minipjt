@@ -1,0 +1,46 @@
+{
+  "retCode": 0,
+  "retMsg": "OK",
+  "time": 1800000000100,
+  "result": {
+    "category": "linear",
+    "nextPageCursor": "",
+    "list": [
+      {
+        "symbol": "BTCUSDT",
+        "contractType": "LinearPerpetual",
+        "status": "Trading",
+        "baseCoin": "BTC",
+        "quoteCoin": "USDT",
+        "settleCoin": "USDT",
+        "fundingInterval": 480,
+        "unifiedMarginTrade": true,
+        "priceFilter": {"minPrice": "100.00", "maxPrice": "1000000.00", "tickSize": "0.10"},
+        "lotSizeFilter": {"minOrderQty": "0.001", "maxOrderQty": "1000", "qtyStep": "0.001", "minNotionalValue": "5"}
+      },
+      {
+        "symbol": "ETHUSDT",
+        "contractType": "LinearPerpetual",
+        "status": "Trading",
+        "baseCoin": "ETH",
+        "quoteCoin": "USDT",
+        "settleCoin": "USDT",
+        "fundingInterval": 480,
+        "unifiedMarginTrade": true,
+        "priceFilter": {"minPrice": "10.00", "maxPrice": "100000.00", "tickSize": "0.01"},
+        "lotSizeFilter": {"minOrderQty": "0.01", "maxOrderQty": "10000", "qtyStep": "0.01", "minNotionalValue": "5"}
+      },
+      {
+        "symbol": "币安人生USDT",
+        "contractType": "LinearPerpetual",
+        "status": "Trading",
+        "baseCoin": "币安人生",
+        "quoteCoin": "USDT",
+        "settleCoin": "USDT",
+        "fundingInterval": 480,
+        "priceFilter": {},
+        "lotSizeFilter": {}
+      }
+    ]
+  }
+}

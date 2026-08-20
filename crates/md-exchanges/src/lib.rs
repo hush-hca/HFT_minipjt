@@ -7,6 +7,7 @@ mod runtime;
 pub mod binance_spot;
 pub mod binance_usdm;
 pub mod bithumb;
+pub mod derivatives;
 pub mod upbit;
 
 pub use backoff::Backoff;

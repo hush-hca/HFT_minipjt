@@ -1076,6 +1076,7 @@ dependencies = [
 name = "md-exchanges"
 version = "0.1.0"
 dependencies = [
+ "funding-core",
  "futures-util",
  "md-core",
  "rand 0.10.2",
