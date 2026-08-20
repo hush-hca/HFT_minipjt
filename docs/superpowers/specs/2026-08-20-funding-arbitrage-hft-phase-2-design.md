@@ -1,7 +1,7 @@
 # Funding-Arbitrage HFT Phase 2 Design
 
 **Date:** 2026-08-20  
-**Status:** Approved in conversation; pending written-spec review  
+**Status:** Revised after self-review; pending final user approval<br>
 **Project:** 손승한 코인 차익·펀비·마이크로피처 기반 HFT 미니프로젝트  
 **Depends on:** `2026-08-19-market-data-collector-design.md` (completed Phase 1)
 
@@ -38,7 +38,8 @@ Phase 1 already delivers the public market-data subset. Phase 2 adds the missing
 - Architecture: layered Rust crates in the existing Cargo workspace.
 - Funding strategy: perpetual-versus-perpetual cross-exchange arbitrage.
 - Initial derivative venues: Binance USDⓈ-M and Bybit USDT Perpetual.
-- Universe: the stable configured order of the existing 20 assets, intersected with active USDT perpetuals on both venues.
+- Mainnet monitor/paper universe: the stable configured order of the existing 20 assets, intersected with active USDT perpetuals on both venues.
+- Testnet execution universe: the independently discovered active intersection on both testnets. Missing mainnet symbols do not fail testnet startup; they are reported as `TESTNET_UNAVAILABLE`.
 - Holding policy: normally remain hedged until both venues' initially identified next funding settlements have passed and been confirmed, then close or re-evaluate. Risk exits may occur earlier.
 - Modes: `monitor`, `paper`, and `testnet`; there is no `live` mode.
 - Phase 2 completion includes GUI, paper trading, Binance fixed-spread testnet order/cancel, and Binance-Bybit bilateral testnet execution.
@@ -55,7 +56,7 @@ Phase 1 already delivers the public market-data subset. Phase 2 adds the missing
 7. Execute and reconcile both legs of a funding pair on Binance and Bybit testnets.
 8. Survive duplicates, out-of-order events, disconnects, partial fills, restarts, and unknown acknowledgements.
 9. Make operational and strategy state inspectable through a responsive `iced` GUI.
-10. Prove at least 99.9% streaming lifecycle attribution in a one-million-event deterministic soak and exact terminal reconciliation before shutdown.
+10. Prove at least 99.9% streaming order/fill attribution across one million canonical orders, including at least 10,000 filled orders, and exact terminal reconciliation before shutdown.
 
 ## 5. Non-goals
 
@@ -132,7 +133,7 @@ The configured asset order remains:
 
 `BTC, ETH, XRP, SOL, DOGE, ADA, AVAX, LINK, DOT, BCH, LTC, ETC, TRX, XLM, ATOM, NEAR, APT, SUI, ARB, OP`.
 
-Funding-strategy eligibility requires, on both derivative venues:
+Mainnet monitor/paper eligibility requires, on both derivative venues:
 
 - active/trading instrument status
 - linear USDT settlement
@@ -140,7 +141,10 @@ Funding-strategy eligibility requires, on both derivative venues:
 - valid tick size, quantity step, minimum quantity, and minimum notional
 - known funding interval and next funding time
 - public book, mark/index, and funding data freshness
-- testnet availability when mode is `testnet`
+
+Testnet discovery applies the same instrument rules to the independently available testnet subset. Its smoke-test symbol is BTCUSDT when it is common and active, otherwise the first active common high-liquidity symbol in configured order. The absence of a particular mainnet symbol is reported, not treated as a parser or runtime failure.
+
+Bybit linear depth uses `orderbook.50.{symbol}`. The adapter consumes the initial snapshot, applies price-keyed delta insert/update/delete operations, resets on every subsequent snapshot, validates update/cross-sequence monotonicity, and reconnects on an unrepairable gap. It emits the best 20 reconstructed levels as the same validated `BookSnapshot` type used by the rest of the system. Incremental reconstruction is contained entirely inside the Bybit adapter; downstream storage and features remain snapshot-based.
 
 Discovery preserves configured order and reports every missing or ineligible pair with a stable reason code.
 
@@ -158,6 +162,8 @@ New normalized public event kinds are:
 - `TraderRatioSnapshot`
 - `QuoteConversionSnapshot`
 
+`InstrumentSpec` includes settlement asset, contract multiplier, tick size, quantity step, minimum/maximum quantity, minimum notional, funding interval, price bounds, and supported position/account modes. Strategy sizing converts venue quantity through the contract multiplier before comparing base-asset delta.
+
 New private event kinds are:
 
 - `OrderUpdate`
@@ -166,7 +172,7 @@ New private event kinds are:
 - `BalanceSnapshot`
 - `FundingIncome`
 
-All events carry adapter, market, canonical symbol, venue symbol, source timestamps where supplied, local receive time, and a unique event identifier. Venue semantics remain explicit. For example, Binance top-trader account ratio and Bybit long/short ratio are stored with different `metric_kind` values and are never silently treated as equivalent.
+All events carry adapter, market, canonical symbol, venue symbol, source timestamps where supplied, local receive time, and a unique event identifier. Venue semantics remain explicit. Funding records include `rate_kind` and settlement-basis semantics so a current venue estimate is never confused with an actual settled rate or account income. For example, Binance top-trader account ratio and Bybit long/short ratio are stored with different `metric_kind` values and are never silently treated as equivalent.
 
 Prices, quantities, rates, fees, notionals, and PnL use exact decimal representations. Persisted financial fields do not use binary floating point.
 
@@ -187,6 +193,8 @@ Order intent and mutable execution state use SQLite in WAL mode because they req
 - operator commands and kill-switch transitions
 
 Secrets are never stored in Arrow, SQLite, reports, logs, screenshots, or configuration files.
+
+A central weighted REST scheduler owns endpoint budgets. Initial defaults poll current funding/mark data through WebSocket where available, instrument and funding-interval metadata every 15 minutes, open interest no faster than every 5 seconds, trader-ratio series every 5 minutes, and account commission data at startup and hourly. Venue responses and current documented weights may force slower polling. A `429`, exhausted local headroom, or missing weight metadata slows or disables the affected poller rather than borrowing order-entry capacity.
 
 ## 11. Feature Definitions
 
@@ -294,7 +302,9 @@ expected_net_pnl =
   - leg_risk_buffer
 ```
 
-No positive basis convergence is assumed unless a separately tested model supplies it. Capacity is the minimum of book depth, venue quantity/notional limits, configured risk limits, and available testnet margin.
+No positive basis convergence is assumed unless a separately tested model supplies it. Capacity is the minimum of book depth, venue quantity/notional limits, configured risk limits, and available testnet margin. Maker/taker fees come from authenticated account commission endpoints when available; otherwise the strategy requires explicit configured fees and labels their source. It never silently assumes zero fees.
+
+Reported realized PnL is decomposed into funding income, entry/exit execution PnL, cross-venue basis movement, trading fees, slippage, and residual mark-to-market. A positive funding component is never presented as a profitable trade when total PnL is negative.
 
 ## 12. Strategy State Machines
 
@@ -328,6 +338,8 @@ The default entry gate requires:
 - one-times leverage and at most 100 USDT per leg
 - at most one active pair
 - no unknown orders or unreconciled account state
+
+Before testnet arming, both clients verify a dedicated clean test account: one-way position mode, non-portfolio margin, configured 1x leverage, no pre-existing positions, and no pre-existing open orders. The executor reports a mismatch and refuses to arm; it does not silently change account, margin, position, or leverage modes.
 
 Orders are parallel marketable IOC limits constrained by the slippage cap. If only one leg fills, the executor cancels residual orders, retries the hedge within a two-second budget, then reduces or closes the filled leg. A residual exposure beyond the emergency limit disables all new strategies.
 
@@ -378,6 +390,8 @@ Safe defaults are:
 - two-second market-data staleness threshold
 - two-second hedge completion budget
 - residual delta limit: max(1 USDT, 0.5% pair notional)
+
+The GUI and reports label these as testnet research defaults, not production recommendations. Any future live design must derive separate limits from account capital, venue rules, liquidation behavior, and independently approved risk policy.
 
 The risk gate rejects new orders when any required feed is stale, clock offset exceeds the signed-request tolerance, public or private connections are unhealthy, margin or liquidation distance is unavailable, the journal cannot commit, order state is unknown, rate-limit headroom is inadequate, or a kill switch is active.
 
@@ -453,7 +467,7 @@ API keys are read from environment variables or an operating-system credential p
 - Rate-limit responses obey venue retry guidance and reduce activity; repeated violations halt the executor.
 - Arrow or SQLite failure blocks new order flow. Existing exposure is reconciled before any automated action.
 - Clock offset beyond tolerance blocks signed calls and testnet arming.
-- GUI command-channel loss does not block the data plane, reconciliation, or exposure monitoring, but it deterministically disarms all new automated testnet entries until the GUI reconnects and the operator arms the mode again.
+- GUI rendering delay or GUI-task failure does not block market processing, reconciliation, or exposure monitoring inside a healthy process; it disarms new automated testnet entries until UI control is restored and the operator arms the mode again. Phase 2 does not promise survival of a process-wide crash: after such a crash, normal restart reconciliation must complete before testnet arming.
 - Graceful shutdown stops new strategy decisions, cancels open quoting orders, resolves in-flight commands, reconciles positions, flushes Arrow, checkpoints SQLite WAL, and writes a final report.
 
 ## 18. Testing Strategy
@@ -483,16 +497,17 @@ API keys are read from environment variables or an operating-system credential p
 
 A frozen Arrow dataset produces byte-stable decisions and equivalent reports given the same config and simulator seed. Replay covers funding rate changes, basis widening, stale conversion quotes, insufficient depth, and early risk exits.
 
-### Million-event reconciliation soak
+### Million-order reconciliation soak
 
-A deterministic local matching engine emits one million order lifecycle events including 10,000 fills and injected duplicates, reordering, omissions, disconnects, partial fills, and cancel/fill races.
+A deterministic local matching engine accepts one million distinct canonical orders and generates every resulting lifecycle event. At least 10,000 of those orders receive one or more fills. The event stream injects duplicates, reordering, omissions, disconnects, partial fills, and cancel/fill races.
 
-- at least 99.9% of streaming updates must be attributed to the correct canonical order without REST repair;
-- after repair, terminal journal, order, fill, and position state must be exactly consistent;
-- duplicate orders, unknown terminal orders, residual positions, and residual delta must all be zero;
-- every injected discrepancy and repair path must appear in the report.
+- pre-repair canonical order-state attribution accuracy must be at least 99.9% across the one million orders;
+- pre-repair fill-to-order attribution accuracy must be at least 99.9% across all generated fills;
+- after REST-style repair, terminal journal, order, fill, and position state must be exactly consistent;
+- duplicate submitted orders, unknown terminal orders, residual positions, and residual delta must all be zero;
+- the report must state canonical order count, lifecycle event count, filled-order count, fill-event count, each accuracy denominator, and every injected discrepancy and repair path.
 
-The one-million-event goal is not implemented by sending one million requests to a public testnet. Testnet validation is rate-limit-safe and reports actual request, order, cancel, fill, reconnect, and reconciliation counts.
+The one-million-order goal is not implemented by sending one million requests to a public testnet. Testnet validation is rate-limit-safe and reports actual request, order, cancel, fill, reconnect, and reconciliation counts.
 
 ### GUI tests
 
@@ -521,11 +536,15 @@ Add read-only opportunity, market-detail, and system-health views first; add str
 
 Add deterministic Arrow replay, fill/funding simulation, cost attribution, fixed-spread simulation, and paired funding strategy state machines.
 
-### Phase 2E: OMS and testnet
+### Phase 2E-1: OMS and Binance fixed-spread testnet
 
-Add SQLite journal, private clients, paper/testnet executor interface, Binance fixed-spread execution, bilateral funding execution, risk gates, restart reconciliation, million-event local soak, and rate-limit-safe public testnet validation.
+Add the SQLite journal, executor/reconciler interfaces, Binance private client, risk gates, restart reconciliation, fixed-spread execution, the million-order local soak, and rate-limit-safe Binance testnet validation.
 
-No later subphase may bypass the acceptance gates of an earlier subphase.
+### Phase 2E-2: Bybit private execution and bilateral funding testnet
+
+Add the Bybit private client, account-mode preflight, cross-venue quantity/multiplier normalization, parallel leg execution, emergency hedge/reduce behavior, settlement confirmation, and rate-limit-safe bilateral testnet validation over the active testnet intersection.
+
+Each of Phase 2A, 2B, 2C, 2D, 2E-1, and 2E-2 receives its own implementation plan, test gates, review, and commit sequence. No later subphase may bypass the acceptance gates of an earlier subphase.
 
 ## 20. Acceptance Criteria
 
@@ -537,9 +556,9 @@ Phase 2 is complete only when:
 4. Unequal funding intervals and timestamps are modeled as discrete cash flows rather than raw-rate subtraction.
 5. Replay is deterministic and paper PnL is fully attributed.
 6. The fixed-spread strategy performs post-only place/cancel/replace and handles partial fills.
-7. The funding strategy can enter, hedge, observe settlements, and close on Binance and Bybit testnets without live endpoints.
+7. The funding strategy can enter, hedge, observe settlements, and close an independently discovered common active symbol on Binance and Bybit testnets without live endpoints; unavailable mainnet symbols are reported as `TESTNET_UNAVAILABLE`.
 8. Any unhedged state triggers the documented retry/reduce/halt policy.
-9. Streaming reconciliation reaches at least 99.9% in the one-million-event soak and terminal state is exact.
+9. Canonical order-state and fill attribution each reach at least 99.9% in the one-million-order soak, at least 10,000 orders are filled, and post-repair terminal state is exact.
 10. Restart reconciliation blocks trading until orders, fills, positions, balances, and funding income agree.
 11. The GUI displays all five views, remains responsive under load, and cannot bypass risk.
 12. Reports disclose data gaps, prediction error, fees, slippage, basis PnL, funding PnL, unknown states, and repairs.
@@ -558,6 +577,9 @@ Phase 2 is complete only when:
 - [Binance USDⓈ-M order updates](https://developers.binance.com/en/docs/products/derivatives-trading-usds-futures/user-data-streams/Event-Order-Update)
 - [Bybit instrument information](https://bybit-exchange.github.io/docs/v5/market/instrument)
 - [Bybit tickers and current funding fields](https://bybit-exchange.github.io/docs/v5/market/tickers)
+- [Bybit public order-book snapshot and delta semantics](https://bybit-exchange.github.io/docs/v5/websocket/public/orderbook)
+- [Bybit position mode](https://bybit-exchange.github.io/docs/v5/position/position-mode)
+- [Bybit account modes](https://bybit-exchange.github.io/docs/v5/acct-mode)
 - [Bybit order creation](https://bybit-exchange.github.io/docs/v5/order/create-order)
 - [Bybit private order stream](https://bybit-exchange.github.io/docs/v5/websocket/private/order)
 - [Bybit private execution stream](https://bybit-exchange.github.io/docs/v5/websocket/private/execution)
