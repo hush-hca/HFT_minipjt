@@ -1,10 +1,18 @@
 mod batch;
+mod derivative_batch;
+mod derivative_partition;
+mod derivative_schema;
 mod partition;
 mod recovery;
 mod schema;
 mod validate;
 
 pub use batch::{BookBatchBuilder, StorageError, TradeBatchBuilder};
+pub use derivative_batch::DerivativeBatchBuilder;
+pub use derivative_partition::{DerivativePartitionKey, DerivativePartitionRouter};
+pub use derivative_schema::{
+    DerivativeEventFamily, DerivativeSchemaContext, derivative_fields, derivative_schema,
+};
 pub use partition::{PartitionKey, PartitionRouter, StorageConfig};
 pub use recovery::{RecoveryError, RecoveryOutcome, recover_partial};
 pub use schema::{

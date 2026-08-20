@@ -13,6 +13,7 @@ use md_core::model::{DECIMAL_PRECISION, DECIMAL_SCALE};
 use serde::Serialize;
 use thiserror::Error;
 
+use crate::derivative_schema::{DerivativeEventFamily, derivative_fields};
 use crate::{
     BOOK_SIDE_ASK, BOOK_SIDE_BID, PROJECT_NAME, SCHEMA_VERSION, TAKER_SIDE_BUY, TAKER_SIDE_SELL,
     TAKER_SIDE_UNKNOWN, TIMESTAMP_PRECISION_MICROSECOND, TIMESTAMP_PRECISION_MILLISECOND,
@@ -137,6 +138,10 @@ fn absolute(path: &Path) -> Result<PathBuf, DatasetError> {
 }
 
 fn validate_file(path: &Path, report: &mut ValidationReport) {
+    if is_derivative_path(path) {
+        validate_derivative_file(path, report);
+        return;
+    }
     let kind = match path.file_name().and_then(|value| value.to_str()) {
         Some("books.arrow") => FileKind::Books,
         Some("trades.arrow") => FileKind::Trades,
@@ -319,10 +324,10 @@ fn validate_schema(
     }
     if metadata
         .get("exchange")
-        .is_some_and(|value| !matches!(value.as_str(), "upbit" | "bithumb" | "binance"))
-        || metadata
-            .get("market")
-            .is_some_and(|value| !matches!(value.as_str(), "spot" | "usdm_futures"))
+        .is_some_and(|value| !matches!(value.as_str(), "upbit" | "bithumb" | "binance" | "bybit"))
+        || metadata.get("market").is_some_and(|value| {
+            !matches!(value.as_str(), "spot" | "usdm_futures" | "linear_futures")
+        })
         || metadata.get("symbol").is_some_and(|value| {
             value
                 .split_once('/')
@@ -453,7 +458,11 @@ fn path_parts(path: &Path) -> Option<PathParts> {
     let market = parts[n - 5].as_str();
     if !matches!(
         (exchange, market),
-        ("upbit", "spot") | ("bithumb", "spot") | ("binance", "spot") | ("binance", "usdm_futures")
+        ("upbit", "spot")
+            | ("bithumb", "spot")
+            | ("binance", "spot")
+            | ("binance", "usdm_futures")
+            | ("bybit", "linear_futures")
     ) || !parts[n - 4]
         .split_once('-')
         .is_some_and(|(base, quote)| valid_symbol_part(base) && valid_symbol_part(quote))
@@ -1053,6 +1062,898 @@ fn valid_symbol_part(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+}
+
+#[derive(Debug)]
+struct DerivativePathParts {
+    family: DerivativeEventFamily,
+    venue: String,
+    market: String,
+    base: String,
+    quote: String,
+    hour_start_us: i64,
+}
+
+fn is_derivative_path(path: &Path) -> bool {
+    let derivative_filename = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_suffix(".arrow"))
+        .and_then(DerivativeEventFamily::parse)
+        .is_some();
+    let parts = path.iter().collect::<Vec<_>>();
+    derivative_filename
+        || parts
+            .len()
+            .checked_sub(8)
+            .is_some_and(|index| parts[index] == "derivatives")
+}
+
+fn derivative_path_parts(path: &Path) -> Option<DerivativePathParts> {
+    let parts = path
+        .iter()
+        .map(|part| part.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    if parts.len() < 8 {
+        return None;
+    }
+    let n = parts.len();
+    if parts[n - 8] != "derivatives" {
+        return None;
+    }
+    let family = DerivativeEventFamily::parse(&parts[n - 7])?;
+    if parts[n - 1] != format!("{}.arrow", family.as_str()) {
+        return None;
+    }
+    let venue = parts[n - 6].clone();
+    let market = parts[n - 5].clone();
+    if !matches!(
+        (venue.as_str(), market.as_str()),
+        ("binance", "usdm_futures")
+            | ("bybit", "linear_futures")
+            | ("binance", "spot")
+            | ("upbit", "spot")
+            | ("bithumb", "spot")
+    ) {
+        return None;
+    }
+    let (base, quote) = parts[n - 4].split_once('-')?;
+    if !valid_symbol_part(base) || !valid_symbol_part(quote) {
+        return None;
+    }
+    let date = NaiveDate::parse_from_str(&parts[n - 3], "%Y-%m-%d").ok()?;
+    let hour = parts[n - 2].parse::<u32>().ok()?;
+    let hour_start_us =
+        DateTime::<Utc>::from_naive_utc_and_offset(date.and_hms_opt(hour, 0, 0)?, Utc)
+            .timestamp_micros();
+    Some(DerivativePathParts {
+        family,
+        venue,
+        market,
+        base: base.into(),
+        quote: quote.into(),
+        hour_start_us,
+    })
+}
+
+fn validate_derivative_file(path: &Path, report: &mut ValidationReport) {
+    let Some(parts) = derivative_path_parts(path) else {
+        issue(
+            report,
+            "PATH_LAYOUT",
+            path,
+            None,
+            None,
+            "derivative Arrow file must end in derivatives/family/venue/market/BASE-QUOTE/YYYY-MM-DD/HH/family.arrow",
+        );
+        return;
+    };
+    if parts.family != DerivativeEventFamily::QuoteConversion
+        && !matches!(
+            (parts.venue.as_str(), parts.market.as_str()),
+            ("binance", "usdm_futures") | ("bybit", "linear_futures")
+        )
+    {
+        issue(
+            report,
+            "PATH_LAYOUT",
+            path,
+            None,
+            None,
+            "non-conversion derivative families require a derivatives venue",
+        );
+    }
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) => {
+            issue(
+                report,
+                "UNREADABLE_ARROW",
+                path,
+                None,
+                None,
+                error.to_string(),
+            );
+            return;
+        }
+    };
+    let mut reader = match StreamReader::try_new(file, None) {
+        Ok(reader) => reader,
+        Err(error) => {
+            issue(
+                report,
+                "UNREADABLE_ARROW",
+                path,
+                None,
+                None,
+                error.to_string(),
+            );
+            return;
+        }
+    };
+    let schema = reader.schema();
+    let schema_ok = validate_derivative_schema(path, schema.as_ref(), &parts, report);
+    let mut event_ids = HashSet::new();
+    for (batch_index, batch) in reader.by_ref().enumerate() {
+        match batch {
+            Ok(batch) => {
+                report.batches += 1;
+                report.rows += batch.num_rows();
+                if schema_ok {
+                    validate_derivative_rows(
+                        path,
+                        batch_index,
+                        &batch,
+                        &parts,
+                        &mut event_ids,
+                        report,
+                    );
+                }
+            }
+            Err(error) => {
+                issue(
+                    report,
+                    "UNREADABLE_ARROW",
+                    path,
+                    Some(batch_index),
+                    None,
+                    error.to_string(),
+                );
+                break;
+            }
+        }
+    }
+    if !has_stream_terminator(path) {
+        issue(
+            report,
+            "UNREADABLE_ARROW",
+            path,
+            None,
+            None,
+            "finalized Arrow stream is missing its end-of-stream marker or has trailing bytes",
+        );
+    }
+}
+
+fn validate_derivative_schema(
+    path: &Path,
+    schema: &Schema,
+    parts: &DerivativePathParts,
+    report: &mut ValidationReport,
+) -> bool {
+    let mut ok = true;
+    let expected = derivative_fields(parts.family);
+    if schema.fields().len() != expected.len()
+        || schema
+            .fields()
+            .iter()
+            .zip(&expected)
+            .any(|(actual, expected)| {
+                actual.name() != expected.name()
+                    || actual.data_type() != expected.data_type()
+                    || actual.is_nullable() != expected.is_nullable()
+            })
+    {
+        issue(
+            report,
+            "SCHEMA_TYPE",
+            path,
+            None,
+            None,
+            "field names, types, order, or nullability do not match the canonical derivative schema",
+        );
+        ok = false;
+    }
+    let metadata = schema.metadata();
+    for (key, expected, code) in [
+        ("project", PROJECT_NAME.to_owned(), "SCHEMA_METADATA"),
+        (
+            "schema_version",
+            SCHEMA_VERSION.to_string(),
+            "SCHEMA_VERSION",
+        ),
+        (
+            "timestamp_unit",
+            "microsecond".to_owned(),
+            "SCHEMA_METADATA",
+        ),
+        (
+            "decimal_scale",
+            DECIMAL_SCALE.to_string(),
+            "DECIMAL_METADATA",
+        ),
+        (
+            "event_family",
+            parts.family.as_str().to_owned(),
+            "EVENT_FAMILY_METADATA",
+        ),
+        ("venue", parts.venue.clone(), "PATH_METADATA_MISMATCH"),
+        ("market", parts.market.clone(), "PATH_METADATA_MISMATCH"),
+        (
+            "symbol",
+            format!("{}/{}", parts.base, parts.quote),
+            "PATH_METADATA_MISMATCH",
+        ),
+    ] {
+        if metadata.get(key) != Some(&expected) {
+            issue(
+                report,
+                code,
+                path,
+                None,
+                None,
+                format!("metadata {key:?} must equal {expected:?}"),
+            );
+            ok = false;
+        }
+    }
+    let expected_hour = DateTime::<Utc>::from_timestamp_micros(parts.hour_start_us)
+        .expect("validated partition hour")
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    if metadata.get("utc_hour") != Some(&expected_hour) {
+        issue(
+            report,
+            "PATH_METADATA_MISMATCH",
+            path,
+            None,
+            None,
+            "metadata utc_hour does not match partition path",
+        );
+        ok = false;
+    }
+    ok
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_derivative_rows(
+    path: &Path,
+    batch_index: usize,
+    batch: &RecordBatch,
+    parts: &DerivativePathParts,
+    event_ids: &mut HashSet<[u8; 16]>,
+    report: &mut ValidationReport,
+) {
+    let versions = derivative_column::<UInt16Array>(batch, 0);
+    let ids = derivative_column::<FixedSizeBinaryArray>(batch, 1);
+    let venue = derivative_column::<StringArray>(batch, 2);
+    let market = derivative_column::<StringArray>(batch, 3);
+    let base = derivative_column::<StringArray>(batch, 4);
+    let quote = derivative_column::<StringArray>(batch, 5);
+    let source_symbol = derivative_column::<StringArray>(batch, 6);
+    let source_ts = derivative_column::<Int64Array>(batch, 7);
+    let local_ts = derivative_column::<Int64Array>(batch, 8);
+    let precision = derivative_column::<UInt8Array>(batch, 9);
+    for row in 0..batch.num_rows() {
+        if versions.value(row) != SCHEMA_VERSION {
+            row_issue(
+                report,
+                "SCHEMA_VERSION",
+                path,
+                batch_index,
+                row,
+                "row schema version is unsupported",
+            );
+        }
+        let id: [u8; 16] = ids
+            .value(row)
+            .try_into()
+            .expect("canonical fixed-size event id");
+        if !event_ids.insert(id) {
+            row_issue(
+                report,
+                "EVENT_GROUPING",
+                path,
+                batch_index,
+                row,
+                "derivative event_id must identify exactly one row",
+            );
+        }
+        for (field, actual, expected) in [
+            ("venue", venue.value(row), parts.venue.as_str()),
+            ("market", market.value(row), parts.market.as_str()),
+            ("base", base.value(row), parts.base.as_str()),
+            ("quote", quote.value(row), parts.quote.as_str()),
+        ] {
+            if actual != expected {
+                row_issue(
+                    report,
+                    "EVENT_GROUPING",
+                    path,
+                    batch_index,
+                    row,
+                    format!("row {field} differs from partition metadata"),
+                );
+            }
+        }
+        if source_symbol.value(row).is_empty() {
+            row_issue(
+                report,
+                "EMPTY_SOURCE_SYMBOL",
+                path,
+                batch_index,
+                row,
+                "source_symbol must not be empty",
+            );
+        }
+        let local = local_ts.value(row);
+        validate_timestamp(
+            path,
+            batch_index,
+            row,
+            "local_recv_ts_us",
+            Some(local),
+            report,
+        );
+        let source = (!source_ts.is_null(row)).then(|| source_ts.value(row));
+        validate_timestamp(
+            path,
+            batch_index,
+            row,
+            "exchange_event_ts_us",
+            source,
+            report,
+        );
+        validate_precision(
+            path,
+            batch_index,
+            row,
+            source.is_some(),
+            precision.value(row),
+            report,
+        );
+        let partition_ts = source.filter(|source| *source > 0).unwrap_or(local);
+        if !(parts.hour_start_us..parts.hour_start_us.saturating_add(3_600_000_000))
+            .contains(&partition_ts)
+        {
+            row_issue(
+                report,
+                "TIMESTAMP_PARTITION_MISMATCH",
+                path,
+                batch_index,
+                row,
+                "selected source/local timestamp is outside the path UTC hour",
+            );
+        }
+        validate_derivative_specific(path, batch_index, row, batch, parts.family, report);
+    }
+}
+
+fn validate_derivative_specific(
+    path: &Path,
+    batch_index: usize,
+    row: usize,
+    batch: &RecordBatch,
+    family: DerivativeEventFamily,
+    report: &mut ValidationReport,
+) {
+    match family {
+        DerivativeEventFamily::Instrument => {
+            for field in [
+                "contract_multiplier",
+                "tick_size",
+                "quantity_step",
+                "min_quantity",
+                "min_notional",
+            ] {
+                validate_named_positive_decimal(
+                    path,
+                    batch_index,
+                    row,
+                    batch,
+                    field,
+                    false,
+                    report,
+                );
+            }
+            for field in ["max_quantity", "price_lower_bound", "price_upper_bound"] {
+                validate_named_positive_decimal(path, batch_index, row, batch, field, true, report);
+            }
+            for field in ["funding_rate_floor", "funding_rate_cap"] {
+                validate_named_decimal(path, batch_index, row, batch, field, report);
+            }
+            let interval = named_u32(batch, "funding_interval_secs").value(row);
+            if interval == 0 {
+                row_issue(
+                    report,
+                    "INVALID_FUNDING_INTERVAL",
+                    path,
+                    batch_index,
+                    row,
+                    "funding interval must be positive",
+                );
+            }
+            validate_enum(
+                path,
+                batch_index,
+                row,
+                batch,
+                "contract_kind",
+                &["perpetual"],
+                report,
+            );
+            let settlement = named_string(batch, "settlement_asset").value(row);
+            if !valid_symbol_part(settlement) {
+                row_issue(
+                    report,
+                    "INVALID_INSTRUMENT_RULE",
+                    path,
+                    batch_index,
+                    row,
+                    "settlement_asset must be an uppercase asset code",
+                );
+            }
+            let min_quantity = named_decimal(batch, "min_quantity").value(row);
+            let max_quantity = named_decimal(batch, "max_quantity");
+            if !max_quantity.is_null(row) && max_quantity.value(row) < min_quantity {
+                row_issue(
+                    report,
+                    "INVALID_INSTRUMENT_RULE",
+                    path,
+                    batch_index,
+                    row,
+                    "max_quantity must not be below min_quantity",
+                );
+            }
+            validate_optional_bounds(
+                path,
+                batch_index,
+                row,
+                batch,
+                "price_lower_bound",
+                "price_upper_bound",
+                false,
+                report,
+            );
+            validate_optional_bounds(
+                path,
+                batch_index,
+                row,
+                batch,
+                "funding_rate_floor",
+                "funding_rate_cap",
+                true,
+                report,
+            );
+            let bounds_provenance =
+                named_string(batch, "funding_rate_bounds_provenance").value(row);
+            let floor_present = !named_decimal(batch, "funding_rate_floor").is_null(row);
+            let cap_present = !named_decimal(batch, "funding_rate_cap").is_null(row);
+            let provenance_consistent = match bounds_provenance {
+                "venue_funding_info" => floor_present && cap_present,
+                "unknown" => !floor_present && !cap_present,
+                _ => true,
+            };
+            if !provenance_consistent {
+                row_issue(
+                    report,
+                    "INVALID_INSTRUMENT_RULE",
+                    path,
+                    batch_index,
+                    row,
+                    "funding bounds disagree with their provenance",
+                );
+            }
+            validate_enum(
+                path,
+                batch_index,
+                row,
+                batch,
+                "funding_interval_provenance",
+                FUNDING_PROVENANCE,
+                report,
+            );
+            validate_enum(
+                path,
+                batch_index,
+                row,
+                batch,
+                "funding_rate_bounds_provenance",
+                &["venue_funding_info", "unknown"],
+                report,
+            );
+            validate_mode_set(
+                path,
+                batch_index,
+                row,
+                batch,
+                "supported_position_modes",
+                &["one_way", "hedge"],
+                report,
+            );
+            validate_mode_set(
+                path,
+                batch_index,
+                row,
+                batch,
+                "supported_account_modes",
+                &["classic", "unified", "portfolio"],
+                report,
+            );
+        }
+        DerivativeEventFamily::MarkIndex => {
+            for field in ["mark_price", "index_price"] {
+                validate_named_positive_decimal(
+                    path,
+                    batch_index,
+                    row,
+                    batch,
+                    field,
+                    false,
+                    report,
+                );
+            }
+        }
+        DerivativeEventFamily::FundingEstimate => {
+            validate_named_decimal(path, batch_index, row, batch, "rate", report);
+            validate_enum(
+                path,
+                batch_index,
+                row,
+                batch,
+                "rate_kind",
+                &["indicative_next"],
+                report,
+            );
+            validate_funding_row(path, batch_index, row, batch, "next_funding_ts_us", report);
+        }
+        DerivativeEventFamily::FundingSettlement => {
+            validate_named_decimal(path, batch_index, row, batch, "rate", report);
+            validate_enum(
+                path,
+                batch_index,
+                row,
+                batch,
+                "rate_kind",
+                &["settled_actual"],
+                report,
+            );
+            validate_funding_row(path, batch_index, row, batch, "settlement_ts_us", report);
+        }
+        DerivativeEventFamily::OpenInterest => {
+            validate_named_positive_decimal(
+                path,
+                batch_index,
+                row,
+                batch,
+                "open_interest",
+                false,
+                report,
+            );
+            validate_named_positive_decimal(
+                path,
+                batch_index,
+                row,
+                batch,
+                "quote_notional",
+                true,
+                report,
+            );
+            validate_enum(
+                path,
+                batch_index,
+                row,
+                batch,
+                "open_interest_unit",
+                &["contracts", "base_asset"],
+                report,
+            );
+        }
+        DerivativeEventFamily::TraderRatio => {
+            validate_enum(
+                path,
+                batch_index,
+                row,
+                batch,
+                "metric_kind",
+                &[
+                    "binance_top_account_ratio",
+                    "binance_top_position_ratio",
+                    "bybit_long_short_ratio",
+                ],
+                report,
+            );
+            for field in ["long_ratio", "long_short_ratio"] {
+                validate_named_nonnegative_decimal(path, batch_index, row, batch, field, report);
+            }
+            validate_named_positive_decimal(
+                path,
+                batch_index,
+                row,
+                batch,
+                "short_ratio",
+                false,
+                report,
+            );
+        }
+        DerivativeEventFamily::QuoteConversion => {
+            validate_enum(
+                path,
+                batch_index,
+                row,
+                batch,
+                "side",
+                &["bid", "ask"],
+                report,
+            );
+            for field in ["price", "executable_quantity"] {
+                validate_named_positive_decimal(
+                    path,
+                    batch_index,
+                    row,
+                    batch,
+                    field,
+                    false,
+                    report,
+                );
+            }
+        }
+    }
+}
+
+fn validate_named_nonnegative_decimal(
+    path: &Path,
+    batch_index: usize,
+    row: usize,
+    batch: &RecordBatch,
+    field: &str,
+    report: &mut ValidationReport,
+) {
+    let column = named_decimal(batch, field);
+    if column.value(row) < 0 {
+        row_issue(
+            report,
+            "NEGATIVE_DECIMAL",
+            path,
+            batch_index,
+            row,
+            format!("{field} must be nonnegative"),
+        );
+    } else {
+        validate_named_decimal(path, batch_index, row, batch, field, report);
+    }
+}
+
+const FUNDING_PROVENANCE: &[&str] = &["venue_payload", "instrument_rule", "assumed_venue_default"];
+
+fn validate_funding_row(
+    path: &Path,
+    batch_index: usize,
+    row: usize,
+    batch: &RecordBatch,
+    timestamp_field: &str,
+    report: &mut ValidationReport,
+) {
+    validate_enum(
+        path,
+        batch_index,
+        row,
+        batch,
+        "funding_basis",
+        &["mark_notional"],
+        report,
+    );
+    validate_enum(
+        path,
+        batch_index,
+        row,
+        batch,
+        "interval_provenance",
+        FUNDING_PROVENANCE,
+        report,
+    );
+    if named_u32(batch, "interval_secs").value(row) == 0 {
+        row_issue(
+            report,
+            "INVALID_FUNDING_INTERVAL",
+            path,
+            batch_index,
+            row,
+            "funding interval must be positive",
+        );
+    }
+    validate_timestamp(
+        path,
+        batch_index,
+        row,
+        timestamp_field,
+        Some(named_i64(batch, timestamp_field).value(row)),
+        report,
+    );
+}
+
+fn validate_enum(
+    path: &Path,
+    batch_index: usize,
+    row: usize,
+    batch: &RecordBatch,
+    field: &str,
+    allowed: &[&str],
+    report: &mut ValidationReport,
+) {
+    if !allowed.contains(&named_string(batch, field).value(row)) {
+        row_issue(
+            report,
+            "INVALID_ENUM",
+            path,
+            batch_index,
+            row,
+            format!("{field} is outside the canonical enum"),
+        );
+    }
+}
+
+fn validate_mode_set(
+    path: &Path,
+    batch_index: usize,
+    row: usize,
+    batch: &RecordBatch,
+    field: &str,
+    allowed: &[&str],
+    report: &mut ValidationReport,
+) {
+    let value = named_string(batch, field).value(row);
+    let modes = value
+        .split(',')
+        .filter(|mode| !mode.is_empty())
+        .collect::<Vec<_>>();
+    let unique = modes.iter().copied().collect::<HashSet<_>>();
+    if modes.is_empty()
+        || unique.len() != modes.len()
+        || modes.iter().any(|mode| !allowed.contains(mode))
+    {
+        row_issue(
+            report,
+            "INVALID_ENUM",
+            path,
+            batch_index,
+            row,
+            format!("{field} contains missing, duplicate, or unknown modes"),
+        );
+    }
+}
+
+fn validate_named_decimal(
+    path: &Path,
+    batch_index: usize,
+    row: usize,
+    batch: &RecordBatch,
+    field: &str,
+    report: &mut ValidationReport,
+) {
+    let column = named_decimal(batch, field);
+    if !column.is_null(row) && column.value(row).unsigned_abs() > MAX_DECIMAL_38 as u128 {
+        row_issue(
+            report,
+            "DECIMAL_RANGE",
+            path,
+            batch_index,
+            row,
+            format!("{field} exceeds Decimal128 precision 38"),
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_optional_bounds(
+    path: &Path,
+    batch_index: usize,
+    row: usize,
+    batch: &RecordBatch,
+    lower_name: &str,
+    upper_name: &str,
+    allow_equal: bool,
+    report: &mut ValidationReport,
+) {
+    let lower = named_decimal(batch, lower_name);
+    let upper = named_decimal(batch, upper_name);
+    if !lower.is_null(row)
+        && !upper.is_null(row)
+        && if allow_equal {
+            lower.value(row) > upper.value(row)
+        } else {
+            lower.value(row) >= upper.value(row)
+        }
+    {
+        row_issue(
+            report,
+            "INVALID_INSTRUMENT_RULE",
+            path,
+            batch_index,
+            row,
+            format!("{lower_name} must be below {upper_name}"),
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_named_positive_decimal(
+    path: &Path,
+    batch_index: usize,
+    row: usize,
+    batch: &RecordBatch,
+    field: &str,
+    nullable: bool,
+    report: &mut ValidationReport,
+) {
+    let column = named_decimal(batch, field);
+    if column.is_null(row) {
+        if !nullable {
+            row_issue(
+                report,
+                "NON_POSITIVE_DECIMAL",
+                path,
+                batch_index,
+                row,
+                format!("{field} must be positive"),
+            );
+        }
+    } else {
+        validate_positive_decimal(path, batch_index, row, field, column.value(row), report);
+    }
+}
+
+fn derivative_column<T: 'static>(batch: &RecordBatch, index: usize) -> &T {
+    batch
+        .column(index)
+        .as_any()
+        .downcast_ref::<T>()
+        .expect("canonical derivative schema")
+}
+
+fn named_decimal<'a>(batch: &'a RecordBatch, name: &str) -> &'a Decimal128Array {
+    batch
+        .column_by_name(name)
+        .expect("canonical field")
+        .as_any()
+        .downcast_ref()
+        .expect("canonical decimal")
+}
+
+fn named_string<'a>(batch: &'a RecordBatch, name: &str) -> &'a StringArray {
+    batch
+        .column_by_name(name)
+        .expect("canonical field")
+        .as_any()
+        .downcast_ref()
+        .expect("canonical string")
+}
+
+fn named_u32<'a>(batch: &'a RecordBatch, name: &str) -> &'a UInt32Array {
+    batch
+        .column_by_name(name)
+        .expect("canonical field")
+        .as_any()
+        .downcast_ref()
+        .expect("canonical u32")
+}
+
+fn named_i64<'a>(batch: &'a RecordBatch, name: &str) -> &'a Int64Array {
+    batch
+        .column_by_name(name)
+        .expect("canonical field")
+        .as_any()
+        .downcast_ref()
+        .expect("canonical i64")
 }
 
 fn row_issue(

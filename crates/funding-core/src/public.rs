@@ -125,21 +125,8 @@ impl DerivativeEvent {
 
     pub fn partition_ts_us(&self) -> i64 {
         let meta = self.meta();
-        let source = meta.source_ts_us;
-        let local = meta.local_recv_ts_us;
-        if local <= 0 {
-            return local;
-        }
-        source
-            .filter(|timestamp| valid_source_timestamp(*timestamp, local))
-            .unwrap_or(local)
+        meta.source_ts_us
+            .filter(|timestamp| *timestamp > 0)
+            .unwrap_or(meta.local_recv_ts_us)
     }
-}
-
-fn valid_source_timestamp(source: i64, local: i64) -> bool {
-    const SEVEN_DAYS_US: i64 = 7 * 24 * 60 * 60 * 1_000_000;
-    const ONE_DAY_US: i64 = 24 * 60 * 60 * 1_000_000;
-    source > 0
-        && (local.saturating_sub(SEVEN_DAYS_US)..=local.saturating_add(ONE_DAY_US))
-            .contains(&source)
 }

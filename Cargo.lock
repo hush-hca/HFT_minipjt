@@ -1101,6 +1101,7 @@ dependencies = [
  "arrow-ipc",
  "arrow-schema",
  "chrono",
+ "funding-core",
  "md-core",
  "serde",
  "tempfile",

@@ -171,6 +171,12 @@ fn partition_timestamp_prefers_a_positive_source_timestamp() {
     missing_source.meta.source_ts_us = Some(1);
     assert_eq!(
         DerivativeEvent::FundingEstimate(missing_source.clone()).partition_ts_us(),
+        1
+    );
+
+    missing_source.meta.source_ts_us = Some(0);
+    assert_eq!(
+        DerivativeEvent::FundingEstimate(missing_source.clone()).partition_ts_us(),
         1_799_999_999_100_000
     );
 
@@ -178,7 +184,32 @@ fn partition_timestamp_prefers_a_positive_source_timestamp() {
     missing_source.meta.local_recv_ts_us = 0;
     assert_eq!(
         DerivativeEvent::FundingEstimate(missing_source).partition_ts_us(),
-        0
+        1_799_999_999_000_000
+    );
+}
+
+#[test]
+fn partition_timestamp_keeps_old_positive_history_source_time() {
+    let local = 1_800_950_400_000_000;
+    let source = 1_800_000_000_000_000;
+    let mut estimate = FundingEstimate {
+        meta: derivative_meta(
+            AdapterId::BinanceUsdm,
+            CanonicalSymbol::new("BTC", "USDT"),
+            "BTCUSDT",
+        ),
+        rate: 0,
+        rate_kind: FundingRateKind::IndicativeNext,
+        basis: FundingBasis::MarkNotional,
+        interval_secs: 28_800,
+        interval_provenance: FundingIntervalProvenance::VenuePayload,
+        next_funding_ts_us: local,
+    };
+    estimate.meta.source_ts_us = Some(source);
+    estimate.meta.local_recv_ts_us = local;
+    assert_eq!(
+        DerivativeEvent::FundingEstimate(estimate).partition_ts_us(),
+        source
     );
 }
 

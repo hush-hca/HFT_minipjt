@@ -54,6 +54,13 @@ pub enum StorageError {
     UnreadableFinal { path: PathBuf, message: String },
     #[error("Arrow stream schema mismatch while merging {path}")]
     MergeSchemaMismatch { path: PathBuf },
+    #[error("invalid derivative event field {field}: {message}")]
+    InvalidDerivative {
+        field: &'static str,
+        message: String,
+    },
+    #[error("derivative writer is poisoned after a prior write or flush failure: {path}")]
+    PoisonedDerivativeWriter { path: PathBuf },
 }
 
 #[derive(Debug, Default)]
