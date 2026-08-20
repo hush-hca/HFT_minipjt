@@ -17,6 +17,21 @@ pub enum FundingBasis {
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum FundingIntervalProvenance {
+    VenuePayload,
+    InstrumentRule,
+    AssumedVenueDefault,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenInterestUnit {
+    Contracts,
+    BaseAsset,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TraderMetricKind {
     BinanceTopAccountRatio,
     BinanceTopPositionRatio,
@@ -44,6 +59,7 @@ pub struct FundingEstimate {
     pub rate_kind: FundingRateKind,
     pub basis: FundingBasis,
     pub interval_secs: u32,
+    pub interval_provenance: FundingIntervalProvenance,
     pub next_funding_ts_us: i64,
 }
 
@@ -54,6 +70,7 @@ pub struct FundingSettlement {
     pub rate_kind: FundingRateKind,
     pub basis: FundingBasis,
     pub interval_secs: u32,
+    pub interval_provenance: FundingIntervalProvenance,
     pub settlement_ts_us: i64,
 }
 
@@ -61,6 +78,8 @@ pub struct FundingSettlement {
 pub struct OpenInterestSnapshot {
     pub meta: DerivativeMeta,
     pub open_interest: i128,
+    pub unit: OpenInterestUnit,
+    pub quote_notional: Option<i128>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]

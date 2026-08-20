@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::meta::DerivativeMeta;
+use crate::{meta::DerivativeMeta, public::FundingIntervalProvenance};
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -36,6 +36,13 @@ pub enum EligibilityReason {
     FundingScheduleUnknown,
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FundingRateBoundsProvenance {
+    VenueFundingInfo,
+    Unknown,
+}
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct InstrumentSpec {
     pub meta: DerivativeMeta,
@@ -48,6 +55,10 @@ pub struct InstrumentSpec {
     pub max_quantity: Option<i128>,
     pub min_notional: i128,
     pub funding_interval_secs: u32,
+    pub funding_interval_provenance: FundingIntervalProvenance,
+    pub funding_rate_floor: Option<i128>,
+    pub funding_rate_cap: Option<i128>,
+    pub funding_rate_bounds_provenance: FundingRateBoundsProvenance,
     pub price_lower_bound: Option<i128>,
     pub price_upper_bound: Option<i128>,
     pub supported_position_modes: Vec<PositionMode>,

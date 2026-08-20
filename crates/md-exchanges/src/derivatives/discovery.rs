@@ -2,8 +2,12 @@ use std::collections::{HashMap, HashSet};
 
 use funding_core::{
     config::{EndpointSet, FundingConfig},
-    instrument::{AccountMode, ContractKind, EligibilityReason, InstrumentSpec, PositionMode},
+    instrument::{
+        AccountMode, ContractKind, EligibilityReason, FundingRateBoundsProvenance, InstrumentSpec,
+        PositionMode,
+    },
     meta::DerivativeMeta,
+    public::FundingIntervalProvenance,
 };
 use md_core::{
     decimal::{DecimalError, parse_decimal_18},
@@ -380,13 +384,29 @@ fn apply_binance_funding_info(
                     .checked_mul(3_600)
                     .ok_or_else(|| "funding_interval_hours overflows seconds".to_owned())
             });
-        match (instruments.specs.get_mut(&symbol), interval) {
-            (Some(spec), Ok(interval)) => spec.funding_interval_secs = interval,
-            (Some(_), Err(detail)) => {
+        let bounds = (|| {
+            let floor = parse_decimal_18(&entry.adjusted_funding_rate_floor)
+                .map_err(|error| format!("adjusted_funding_rate_floor: {error}"))?;
+            let cap = parse_decimal_18(&entry.adjusted_funding_rate_cap)
+                .map_err(|error| format!("adjusted_funding_rate_cap: {error}"))?;
+            if floor >= cap {
+                return Err("adjusted funding rate floor must be less than cap".to_owned());
+            }
+            Ok((floor, cap))
+        })();
+        match (instruments.specs.get_mut(&symbol), interval, bounds) {
+            (Some(spec), Ok(interval), Ok((floor, cap))) => {
+                spec.funding_interval_secs = interval;
+                spec.funding_interval_provenance = FundingIntervalProvenance::VenuePayload;
+                spec.funding_rate_floor = Some(floor);
+                spec.funding_rate_cap = Some(cap);
+                spec.funding_rate_bounds_provenance = FundingRateBoundsProvenance::VenueFundingInfo;
+            }
+            (Some(_), Err(detail), _) | (Some(_), _, Err(detail)) => {
                 instruments.specs.remove(&symbol);
                 instruments.invalid.insert(symbol, detail);
             }
-            (None, _) => {}
+            (None, _, _) => {}
         }
     }
     Ok(())
@@ -502,6 +522,10 @@ fn binance_spec(
                 .or(notional.min_notional.as_deref()),
         )?,
         funding_interval_secs,
+        funding_interval_provenance: FundingIntervalProvenance::AssumedVenueDefault,
+        funding_rate_floor: None,
+        funding_rate_cap: None,
+        funding_rate_bounds_provenance: FundingRateBoundsProvenance::Unknown,
         price_lower_bound: disabled_zero_bound("price_lower_bound", price.min_price.as_deref())?,
         price_upper_bound: disabled_zero_bound("price_upper_bound", price.max_price.as_deref())?,
         supported_position_modes: vec![PositionMode::OneWay, PositionMode::Hedge],
@@ -549,6 +573,10 @@ fn bybit_spec(
             market.lot_size_filter.min_notional_value.as_deref(),
         )?,
         funding_interval_secs,
+        funding_interval_provenance: FundingIntervalProvenance::VenuePayload,
+        funding_rate_floor: None,
+        funding_rate_cap: None,
+        funding_rate_bounds_provenance: FundingRateBoundsProvenance::Unknown,
         price_lower_bound: Some(positive_decimal(
             "price_lower_bound",
             market.price_filter.min_price.as_deref(),
@@ -739,6 +767,8 @@ struct BinanceMarket {
 #[serde(rename_all = "camelCase")]
 struct BinanceFundingInfo {
     symbol: String,
+    adjusted_funding_rate_cap: String,
+    adjusted_funding_rate_floor: String,
     funding_interval_hours: u32,
 }
 

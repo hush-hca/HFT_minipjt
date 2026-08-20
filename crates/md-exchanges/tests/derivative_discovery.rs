@@ -1,4 +1,5 @@
 use funding_core::config::FundingConfig;
+use funding_core::{instrument::FundingRateBoundsProvenance, public::FundingIntervalProvenance};
 use md_core::{decimal::parse_decimal_18, model::AdapterId};
 use md_exchanges::derivatives::discovery::{
     DiscoveryError, Environment, VenueInstruments, discover_derivatives, intersect_active,
@@ -64,6 +65,15 @@ fn venue_rules_are_exact_and_unrelated_unicode_does_not_disturb_order() {
     assert_eq!(btc.binance.min_notional, parse_decimal_18("5").unwrap());
     assert_eq!(btc.binance.funding_interval_secs, 28_800);
     assert_eq!(
+        btc.binance.funding_interval_provenance,
+        FundingIntervalProvenance::AssumedVenueDefault
+    );
+    assert_eq!(btc.binance.funding_rate_floor, None);
+    assert_eq!(
+        btc.binance.funding_rate_bounds_provenance,
+        FundingRateBoundsProvenance::Unknown
+    );
+    assert_eq!(
         btc.bybit.price_upper_bound,
         Some(parse_decimal_18("1000000.00").unwrap())
     );
@@ -124,7 +134,7 @@ fn malformed_representable_configured_instrument_is_rule_invalid() {
 async fn network_discovery_uses_the_selected_environment_only() {
     let binance = fixture("binance_usdm_instruments_phase2.json");
     let bybit = fixture("bybit_linear_instruments.json");
-    let funding_info = br#"[{"symbol":"BTCUSDT","fundingIntervalHours":4}]"#.to_vec();
+    let funding_info = br#"[{"symbol":"BTCUSDT","adjustedFundingRateCap":"0.005","adjustedFundingRateFloor":"-0.004","fundingIntervalHours":4}]"#.to_vec();
     let (binance_url, binance_task, _) = serve_responses(vec![binance, funding_info]).await;
     let (bybit_url, bybit_task, _) = serve_responses(vec![bybit]).await;
     let mut cfg = FundingConfig::load(std::path::Path::new("../../config/funding.toml")).unwrap();
@@ -138,6 +148,26 @@ async fn network_discovery_uses_the_selected_environment_only() {
     assert_eq!(bases(&result.eligible), ["BTC", "ETH"]);
     assert_eq!(result.eligible[0].binance.funding_interval_secs, 14_400);
     assert_eq!(result.eligible[1].binance.funding_interval_secs, 28_800);
+    assert_eq!(
+        result.eligible[0].binance.funding_rate_cap,
+        Some(parse_decimal_18("0.005").unwrap())
+    );
+    assert_eq!(
+        result.eligible[0].binance.funding_interval_provenance,
+        FundingIntervalProvenance::VenuePayload
+    );
+    assert!(
+        md_exchanges::derivatives::binance::FundingRules::from_instrument(
+            &result.eligible[0].binance
+        )
+        .is_ok()
+    );
+    assert!(matches!(
+        md_exchanges::derivatives::binance::FundingRules::from_instrument(
+            &result.eligible[1].binance
+        ),
+        Err(md_exchanges::derivatives::binance::DerivativeParseError::MissingRateBounds)
+    ));
     assert_eq!(result.excluded[0].code, "TESTNET_UNAVAILABLE");
     binance_task.await.unwrap();
     bybit_task.await.unwrap();

@@ -1,0 +1,7 @@
+{
+  "topic": "tickers.BTCUSDT",
+  "type": "delta",
+  "ts": 1720000000023,
+  "cs": 99,
+  "data": {"symbol": "BTCUSDT", "fundingRate": "0.000120000000000001"}
+}

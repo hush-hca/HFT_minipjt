@@ -2,7 +2,10 @@ use funding_core::{
     config::FundingConfig,
     instrument::{AccountMode, ContractKind, InstrumentSpec, PositionMode},
     meta::DerivativeMeta,
-    public::{DerivativeEvent, FundingBasis, FundingEstimate, FundingRateKind},
+    public::{
+        DerivativeEvent, FundingBasis, FundingEstimate, FundingIntervalProvenance, FundingRateKind,
+        OpenInterestSnapshot, OpenInterestUnit,
+    },
 };
 use md_core::model::{AdapterId, CanonicalSymbol, DECIMAL_SCALE, TimestampPrecision};
 use uuid::Uuid;
@@ -39,6 +42,7 @@ fn funding_config_and_types_preserve_venue_semantics() {
         rate_kind: FundingRateKind::IndicativeNext,
         basis: FundingBasis::MarkNotional,
         interval_secs: 28_800,
+        interval_provenance: FundingIntervalProvenance::InstrumentRule,
         next_funding_ts_us: 1_800_000_000_000_000,
     });
     assert!(matches!(event, DerivativeEvent::FundingEstimate(_)));
@@ -47,6 +51,22 @@ fn funding_config_and_types_preserve_venue_semantics() {
         event.meta().source_ts_precision,
         TimestampPrecision::Millisecond
     );
+}
+
+#[test]
+fn open_interest_and_funding_interval_semantics_are_explicit() {
+    let oi = OpenInterestSnapshot {
+        meta: derivative_meta(
+            AdapterId::BybitLinear,
+            CanonicalSymbol::new("BTC", "USDT"),
+            "BTCUSDT",
+        ),
+        open_interest: 10_000_000_000_000_000_000,
+        unit: OpenInterestUnit::BaseAsset,
+        quote_notional: Some(600_000_000_000_000_000_000_000),
+    };
+    assert_eq!(oi.unit, OpenInterestUnit::BaseAsset);
+    assert!(oi.quote_notional.is_some());
 }
 
 #[test]
@@ -139,6 +159,7 @@ fn partition_timestamp_prefers_a_positive_source_timestamp() {
         rate_kind: FundingRateKind::IndicativeNext,
         basis: FundingBasis::MarkNotional,
         interval_secs: 28_800,
+        interval_provenance: FundingIntervalProvenance::AssumedVenueDefault,
         next_funding_ts_us: 1_800_000_000_000_000,
     });
     assert_eq!(event.partition_ts_us(), 1_799_999_999_000_000);
@@ -173,6 +194,11 @@ fn test_usdt_perpetual(venue: AdapterId, symbol: CanonicalSymbol) -> InstrumentS
         max_quantity: Some(1_000_000_000_000_000_000_000),
         min_notional: 5_000_000_000_000_000_000,
         funding_interval_secs: 28_800,
+        funding_interval_provenance: FundingIntervalProvenance::VenuePayload,
+        funding_rate_floor: Some(-5_000_000_000_000_000),
+        funding_rate_cap: Some(5_000_000_000_000_000),
+        funding_rate_bounds_provenance:
+            funding_core::instrument::FundingRateBoundsProvenance::VenueFundingInfo,
         price_lower_bound: None,
         price_upper_bound: None,
         supported_position_modes: vec![PositionMode::OneWay, PositionMode::Hedge],
