@@ -44,8 +44,37 @@ pub enum ParseError {
     },
     #[error("frame exceeds the supported raw-size counter")]
     FrameTooLarge,
+    #[error("a Bybit depth delta arrived before a snapshot")]
+    SnapshotRequired,
+    #[error("Bybit {field} sequence regressed: previous {previous}, received {received}")]
+    SequenceRegression {
+        field: &'static str,
+        previous: u64,
+        received: u64,
+    },
+    #[error("Bybit {side} book quantity at price {price} cannot be negative: {quantity}")]
+    InvalidBookQuantity {
+        side: &'static str,
+        price: i128,
+        quantity: i128,
+    },
+    #[error("Bybit {side} book price must be positive, got {price}")]
+    InvalidBookPrice { side: &'static str, price: i128 },
+    #[error("Bybit reconstructed book needs at least 20 {side} levels, got {actual}")]
+    InsufficientBookDepth { side: &'static str, actual: usize },
+    #[error("Bybit control operation `{op}` failed: {detail}")]
+    ControlFailure { op: String, detail: String },
     #[error("normalized event failed validation: {0}")]
     Validation(#[from] ValidationError),
+}
+
+impl ParseError {
+    pub fn requires_reconnect(&self) -> bool {
+        matches!(
+            self,
+            Self::SnapshotRequired | Self::SequenceRegression { .. } | Self::ControlFailure { .. }
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy)]

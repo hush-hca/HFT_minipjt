@@ -20,6 +20,8 @@ const PARSE_ERROR_THRESHOLD: u8 = 10;
 
 pub trait FrameParser: Send + Sync {
     fn parse(&self, frame: &mut [u8], recv_us: i64) -> Result<Vec<NormalizedEvent>, ParseError>;
+
+    fn reset(&self) {}
 }
 
 macro_rules! parser_adapter {
@@ -305,6 +307,7 @@ async fn run_session(
     stats: &dyn RuntimeStats,
     options: &RuntimeOptions,
 ) -> Result<SessionEnd, RuntimeError> {
+    runtime.parser.reset();
     let connect_result = tokio::select! {
         () = shutdown.cancelled() => return Ok(SessionEnd::Cancelled),
         result = connect_async(runtime.websocket_url.as_str()) => result,
@@ -411,6 +414,7 @@ async fn run_session(
                                 }
                             }
                             FrameResult::Backpressure => return Ok(SessionEnd::Reconnect { reason: ReconnectReason::Backpressure, healthy_for: healthy_started.elapsed() }),
+                            FrameResult::Reconnect(reason) => return Ok(SessionEnd::Reconnect { reason, healthy_for: healthy_started.elapsed() }),
                             FrameResult::Cancelled => return Ok(SessionEnd::Cancelled),
                         }
                     }
@@ -426,6 +430,7 @@ async fn run_session(
                                 }
                             }
                             FrameResult::Backpressure => return Ok(SessionEnd::Reconnect { reason: ReconnectReason::Backpressure, healthy_for: healthy_started.elapsed() }),
+                            FrameResult::Reconnect(reason) => return Ok(SessionEnd::Reconnect { reason, healthy_for: healthy_started.elapsed() }),
                             FrameResult::Cancelled => return Ok(SessionEnd::Cancelled),
                         }
                     }
@@ -442,6 +447,7 @@ enum FrameResult {
     Rejected,
     Backpressure,
     Cancelled,
+    Reconnect(ReconnectReason),
 }
 
 async fn process_frame(
@@ -464,40 +470,38 @@ async fn process_frame(
                 RejectReason::Parse
             };
             stats.on_rejected_event(runtime.id, reason);
+            if error.requires_reconnect() {
+                return Ok(FrameResult::Reconnect(ReconnectReason::Protocol));
+            }
             return Ok(FrameResult::Rejected);
         }
     };
 
-    let mut books = 0_u64;
-    let mut book_rows = 0_u64;
-    let mut trades = 0_u64;
-    for event in &events {
-        match event {
-            NormalizedEvent::Book(book) => {
-                books += 1;
-                book_rows = book_rows.saturating_add(
-                    u64::try_from(book.bids.len().saturating_add(book.asks.len()))
-                        .unwrap_or(u64::MAX),
-                );
-            }
-            NormalizedEvent::Trade(_) => trades += 1,
-        }
-        if let Some(source_us) = event.meta().exchange_event_ts_us
-            && recv_us >= source_us
-        {
-            stats.on_receive_lag_us(runtime.id, (recv_us - source_us) as u64);
-        }
-    }
-    stats.on_events(runtime.id, books, book_rows, trades);
-
     for event in events {
+        let (books, book_rows, trades) = match &event {
+            NormalizedEvent::Book(book) => (
+                1,
+                u64::try_from(book.bids.len().saturating_add(book.asks.len())).unwrap_or(u64::MAX),
+                0,
+            ),
+            NormalizedEvent::Trade(_) => (0, 0, 1),
+        };
+        let source_us = event.meta().exchange_event_ts_us;
         let send = tokio::time::timeout(options.send_timeout, tx.send(event));
         let result = tokio::select! {
             () = shutdown.cancelled() => return Ok(FrameResult::Cancelled),
             result = send => result,
         };
         match result {
-            Ok(Ok(())) => stats.on_queue_depth(runtime.id, tx.max_capacity() - tx.capacity()),
+            Ok(Ok(())) => {
+                stats.on_events(runtime.id, books, book_rows, trades);
+                if let Some(source_us) = source_us
+                    && recv_us >= source_us
+                {
+                    stats.on_receive_lag_us(runtime.id, (recv_us - source_us) as u64);
+                }
+                stats.on_queue_depth(runtime.id, tx.max_capacity() - tx.capacity());
+            }
             Ok(Err(_)) => return Err(RuntimeError::EventReceiverClosed),
             Err(_) => {
                 stats.on_rejected_event(runtime.id, RejectReason::Backpressure);

@@ -1,5 +1,6 @@
 mod backoff;
 mod binance;
+mod bybit;
 mod discovery;
 mod domestic;
 mod runtime;
@@ -11,6 +12,7 @@ pub mod derivatives;
 pub mod upbit;
 
 pub use backoff::Backoff;
+pub use bybit::BybitLinearParser;
 pub use discovery::{
     DiscoveryError, DiscoveryResult, SubscriptionError, build_combined_stream_url,
     build_subscription, discover_markets, discovery_from_payload,
