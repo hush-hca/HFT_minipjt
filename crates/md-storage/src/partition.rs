@@ -431,5 +431,6 @@ fn adapter_path(adapter: AdapterId) -> (&'static str, &'static str) {
         AdapterId::BithumbSpot => ("bithumb", "spot"),
         AdapterId::BinanceSpot => ("binance", "spot"),
         AdapterId::BinanceUsdm => ("binance", "usdm_futures"),
+        AdapterId::BybitLinear => ("bybit", "linear_futures"),
     }
 }

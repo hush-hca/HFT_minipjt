@@ -1,26 +1,27 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
 pub const DECIMAL_PRECISION: u8 = 38;
 pub const DECIMAL_SCALE: i8 = 18;
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub enum AdapterId {
     UpbitSpot,
     BithumbSpot,
     BinanceSpot,
     BinanceUsdm,
+    BybitLinear,
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
 pub enum TimestampPrecision {
     Microsecond,
     Millisecond,
     Unavailable,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize)]
+#[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct CanonicalSymbol {
     pub base: String,
     pub quote: String,

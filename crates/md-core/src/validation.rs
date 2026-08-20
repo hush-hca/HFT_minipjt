@@ -106,7 +106,7 @@ fn validate_source_timestamp(
     Ok(())
 }
 
-fn validate_book(book: &BookSnapshot) -> Result<(), ValidationError> {
+pub fn validate_book(book: &BookSnapshot) -> Result<(), ValidationError> {
     if book.bids.is_empty() {
         return Err(ValidationError::EmptyBookSide {
             side: BookSide::Bid,

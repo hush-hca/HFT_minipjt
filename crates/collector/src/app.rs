@@ -313,12 +313,22 @@ impl CollectorApp {
                         .to_string(),
                     String::new(),
                 ),
+                AdapterId::BybitLinear => {
+                    return Err(anyhow!(
+                        "adapter BybitLinear is not supported by the Phase 1 collector runtime"
+                    ));
+                }
             };
             let parser: Arc<dyn FrameParser> = match adapter {
                 AdapterId::UpbitSpot => Arc::new(UpbitParser),
                 AdapterId::BithumbSpot => Arc::new(BithumbParser),
                 AdapterId::BinanceSpot => Arc::new(BinanceSpotParser),
                 AdapterId::BinanceUsdm => Arc::new(BinanceUsdmParser),
+                AdapterId::BybitLinear => {
+                    return Err(anyhow!(
+                        "adapter BybitLinear is not supported by the Phase 1 collector runtime"
+                    ));
+                }
             };
             let proactive = config
                 .proactive_reconnect_secs

@@ -112,6 +112,16 @@ fn partition_path_is_utc_and_event_specific() {
 }
 
 #[test]
+fn bybit_linear_uses_its_own_storage_namespace() {
+    let key =
+        PartitionKey::from_parts(AdapterId::BybitLinear, "BTC", "USDT", HOUR_02_START).unwrap();
+    assert_eq!(
+        key.book_path(Path::new("data")),
+        Path::new("data/bybit/linear_futures/BTC-USDT/2024-09-10/01/books.arrow.partial")
+    );
+}
+
+#[test]
 fn unsafe_symbols_are_rejected_before_forming_paths() {
     for bad in ["", "../BTC", "BTC/USD", "BT C", "ÉTH", "btc"] {
         assert!(

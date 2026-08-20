@@ -1,5 +1,11 @@
 [workspace]
-members = ["crates/md-core", "crates/md-exchanges", "crates/md-storage", "crates/collector"]
+members = [
+    "crates/md-core",
+    "crates/md-exchanges",
+    "crates/md-storage",
+    "crates/collector",
+    "crates/funding-core",
+]
 resolver = "2"
 
 [workspace.package]

@@ -61,6 +61,20 @@ fn statistics_snapshot_contains_all_health_signals() {
 }
 
 #[test]
+fn statistics_registry_accepts_bybit_without_widening_phase_one_snapshots() {
+    let stats = StatsRegistry::new(16);
+    stats.on_frame(AdapterId::BybitLinear, 64);
+    assert_eq!(stats.snapshot(AdapterId::BybitLinear).frames, 1);
+    assert_eq!(stats.snapshots().len(), 4);
+    assert!(
+        stats
+            .snapshots()
+            .iter()
+            .all(|snapshot| snapshot.adapter != "bybit_linear")
+    );
+}
+
+#[test]
 fn gaps_keep_exact_start_end_and_reason() {
     let times = [1_000_i64, 2_500_i64];
     let stats = StatsRegistry::with_clock(16, move || {
@@ -232,6 +246,48 @@ async fn strict_discovery_failure_happens_before_storage_is_opened() {
     assert!(!root.exists());
 }
 
+#[tokio::test]
+async fn phase_one_collect_launches_only_the_original_four_adapters() {
+    let root = unique_root("phase-one-adapter-boundary");
+    let mut cfg = config(root.clone(), false, 10);
+    for adapter in cfg.adapters.values_mut() {
+        adapter.enabled = true;
+    }
+    let supervisor = Arc::new(CountingSupervisor::default());
+    let app = CollectorApp::with_services(
+        cfg,
+        Arc::new(FakeDiscovery::all_available()),
+        supervisor.clone(),
+        Arc::new(RecordingEmitter::default()),
+    )
+    .unwrap();
+    let shutdown = CancellationToken::new();
+    let running = tokio::spawn(app.run(shutdown.clone()));
+
+    supervisor.all_started.notified().await;
+    shutdown.cancel();
+    running.await.unwrap().unwrap();
+
+    let mut launched = supervisor.launched.lock().unwrap().clone();
+    launched.sort_by_key(|adapter| match adapter {
+        AdapterId::UpbitSpot => 0,
+        AdapterId::BithumbSpot => 1,
+        AdapterId::BinanceSpot => 2,
+        AdapterId::BinanceUsdm => 3,
+        AdapterId::BybitLinear => 4,
+    });
+    assert_eq!(
+        launched,
+        vec![
+            AdapterId::UpbitSpot,
+            AdapterId::BithumbSpot,
+            AdapterId::BinanceSpot,
+            AdapterId::BinanceUsdm,
+        ]
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
 #[derive(Clone)]
 struct FakeDiscovery {
     fail: bool,
@@ -296,6 +352,38 @@ struct FakeSupervisor {
     event: Option<NormalizedEvent>,
     started: Arc<Notify>,
     cancelled: Arc<AtomicBool>,
+}
+
+#[derive(Default)]
+struct CountingSupervisor {
+    launched: Arc<Mutex<Vec<AdapterId>>>,
+    all_started: Arc<Notify>,
+}
+
+impl AdapterSupervisor for CountingSupervisor {
+    fn run(
+        &self,
+        runtime: AdapterRuntime,
+        _options: RuntimeOptions,
+        _tx: mpsc::Sender<NormalizedEvent>,
+        shutdown: CancellationToken,
+        _stats: Arc<dyn RuntimeStats>,
+    ) -> SupervisorFuture {
+        let launched = Arc::clone(&self.launched);
+        let all_started = Arc::clone(&self.all_started);
+        Box::pin(async move {
+            let count = {
+                let mut launched = launched.lock().unwrap();
+                launched.push(runtime.id);
+                launched.len()
+            };
+            if count == 4 {
+                all_started.notify_one();
+            }
+            shutdown.cancelled().await;
+            Ok(())
+        })
+    }
 }
 
 impl FakeSupervisor {
