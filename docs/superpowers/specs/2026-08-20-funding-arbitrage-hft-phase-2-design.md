@@ -1,7 +1,7 @@
 # Funding-Arbitrage HFT Phase 2 Design
 
 **Date:** 2026-08-20  
-**Status:** Revised after self-review; pending final user approval<br>
+**Status:** Approved for implementation<br>
 **Project:** 손승한 코인 차익·펀비·마이크로피처 기반 HFT 미니프로젝트  
 **Depends on:** `2026-08-19-market-data-collector-design.md` (completed Phase 1)
 
