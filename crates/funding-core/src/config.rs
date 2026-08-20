@@ -135,8 +135,11 @@ impl FundingConfig {
             validate_endpoint_set(name, "testnet", &venue.testnet)?;
         }
 
-        if self.quote_conversions.is_empty() {
-            return invalid("quote_conversions must not be empty");
+        if self.quote_conversions.len() != 1
+            || self.quote_conversions[0].base != "USDT"
+            || self.quote_conversions[0].quote != "KRW"
+        {
+            return invalid("quote_conversions must contain exactly the USDT/KRW reference");
         }
         let mut conversion_pairs = HashSet::with_capacity(self.quote_conversions.len());
         for conversion in &self.quote_conversions {

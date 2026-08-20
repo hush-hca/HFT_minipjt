@@ -109,6 +109,8 @@ pub enum GapReason {
 }
 
 pub trait RuntimeStats: Send + Sync {
+    fn on_websocket_connect_attempt(&self, _adapter: AdapterId) {}
+    fn on_websocket_subscription_attempt(&self, _adapter: AdapterId) {}
     fn on_frame(&self, adapter: AdapterId, bytes: u32);
     fn on_events(&self, adapter: AdapterId, books: u64, book_rows: u64, trades: u64);
     fn on_parse_error(&self, adapter: AdapterId);
@@ -119,6 +121,7 @@ pub trait RuntimeStats: Send + Sync {
     fn on_backpressure_disconnect(&self, adapter: AdapterId);
     fn open_gap(&self, adapter: AdapterId, reason: GapReason);
     fn close_gap(&self, adapter: AdapterId);
+    fn on_sequence_gap(&self, _adapter: AdapterId) {}
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -308,9 +311,16 @@ async fn run_session(
     options: &RuntimeOptions,
 ) -> Result<SessionEnd, RuntimeError> {
     runtime.parser.reset();
+    stats.on_websocket_connect_attempt(runtime.id);
     let connect_result = tokio::select! {
         () = shutdown.cancelled() => return Ok(SessionEnd::Cancelled),
-        result = connect_async(runtime.websocket_url.as_str()) => result,
+        result = tokio::time::timeout(options.send_timeout, connect_async(runtime.websocket_url.as_str())) => match result {
+            Ok(result) => result,
+            Err(_) => return Ok(SessionEnd::Reconnect {
+                reason: ReconnectReason::Protocol,
+                healthy_for: Duration::ZERO,
+            }),
+        },
     };
     let (mut websocket, _) = match connect_result {
         Ok(connection) => connection,
@@ -322,6 +332,9 @@ async fn run_session(
         }
     };
 
+    if !runtime.subscription.is_empty() {
+        stats.on_websocket_subscription_attempt(runtime.id);
+    }
     if !runtime.subscription.is_empty()
         && timed_ws_send(
             &mut websocket,
@@ -464,6 +477,12 @@ async fn process_frame(
         Ok(events) => events,
         Err(error) => {
             stats.on_parse_error(runtime.id);
+            if matches!(
+                error,
+                ParseError::SnapshotRequired | ParseError::SequenceRegression { .. }
+            ) {
+                stats.on_sequence_gap(runtime.id);
+            }
             let reason = if matches!(error, ParseError::Validation(_)) {
                 RejectReason::Validation
             } else {

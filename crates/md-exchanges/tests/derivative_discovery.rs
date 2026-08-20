@@ -2,10 +2,44 @@ use funding_core::config::FundingConfig;
 use funding_core::{instrument::FundingRateBoundsProvenance, public::FundingIntervalProvenance};
 use md_core::{decimal::parse_decimal_18, model::AdapterId};
 use md_exchanges::derivatives::discovery::{
-    DiscoveryError, Environment, VenueInstruments, discover_derivatives, intersect_active,
-    parse_binance_instruments, parse_bybit_instruments,
+    DiscoveryError, DiscoveryRequestObserver, Environment, VenueInstruments, discover_derivatives,
+    discover_derivatives_observed, intersect_active, parse_binance_instruments,
+    parse_bybit_instruments,
 };
+use reqwest::{StatusCode, header::HeaderMap};
 use std::sync::{Arc, Mutex};
+use url::Url;
+
+#[derive(Default)]
+struct RecordingObserver {
+    started: Mutex<Vec<String>>,
+    completed: Mutex<Vec<String>>,
+    abandoned: Mutex<Vec<String>>,
+}
+
+impl DiscoveryRequestObserver for RecordingObserver {
+    fn before_request(&self, _adapter: AdapterId, url: &Url) -> Result<(), String> {
+        self.started.lock().unwrap().push(url.as_str().to_owned());
+        Ok(())
+    }
+
+    fn complete_request(
+        &self,
+        _adapter: AdapterId,
+        url: &Url,
+        _headers: &HeaderMap,
+        _status: StatusCode,
+        _bybit_ret_code: Option<i64>,
+    ) -> Result<(), String> {
+        self.completed.lock().unwrap().push(url.as_str().to_owned());
+        Ok(())
+    }
+
+    fn abandon_request(&self, _adapter: AdapterId, url: &Url) -> Result<(), String> {
+        self.abandoned.lock().unwrap().push(url.as_str().to_owned());
+        Ok(())
+    }
+}
 
 fn fixture(name: &str) -> Vec<u8> {
     std::fs::read(format!("tests/fixtures/{name}")).unwrap()
@@ -142,9 +176,15 @@ async fn network_discovery_uses_the_selected_environment_only() {
     cfg.venues.get_mut("binance_usdm").unwrap().testnet.rest_url = binance_url;
     cfg.venues.get_mut("bybit_linear").unwrap().testnet.rest_url = bybit_url;
 
-    let result = discover_derivatives(&reqwest::Client::new(), &cfg, Environment::Testnet)
-        .await
-        .unwrap();
+    let observer = RecordingObserver::default();
+    let result = discover_derivatives_observed(
+        &reqwest::Client::new(),
+        &cfg,
+        Environment::Testnet,
+        &observer,
+    )
+    .await
+    .unwrap();
     assert_eq!(bases(&result.eligible), ["BTC", "ETH"]);
     assert_eq!(result.eligible[0].binance.funding_interval_secs, 14_400);
     assert_eq!(result.eligible[1].binance.funding_interval_secs, 28_800);
@@ -187,9 +227,15 @@ async fn bybit_pagination_forwards_cursor_merges_pages_and_preserves_configured_
     cfg.venues.get_mut("binance_usdm").unwrap().testnet.rest_url = binance_url;
     cfg.venues.get_mut("bybit_linear").unwrap().testnet.rest_url = bybit_url;
 
-    let result = discover_derivatives(&reqwest::Client::new(), &cfg, Environment::Testnet)
-        .await
-        .unwrap();
+    let observer = RecordingObserver::default();
+    let result = discover_derivatives_observed(
+        &reqwest::Client::new(),
+        &cfg,
+        Environment::Testnet,
+        &observer,
+    )
+    .await
+    .unwrap();
     assert_eq!(bases(&result.eligible), ["BTC", "ETH"]);
     {
         let requests = requests.lock().unwrap();
@@ -197,6 +243,15 @@ async fn bybit_pagination_forwards_cursor_merges_pages_and_preserves_configured_
         assert!(!requests[0].contains("cursor="));
         assert!(requests[1].contains("cursor=cursor-A"));
     }
+    let started = observer.started.lock().unwrap().clone();
+    let completed = observer.completed.lock().unwrap().clone();
+    assert_eq!(
+        started.len(),
+        4,
+        "two Binance requests plus two Bybit pages"
+    );
+    assert_eq!(completed, started);
+    assert!(observer.abandoned.lock().unwrap().is_empty());
     binance_task.await.unwrap();
     bybit_task.await.unwrap();
 }

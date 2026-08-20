@@ -560,6 +560,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "funding-app"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "funding-core",
+ "futures-util",
+ "humantime",
+ "md-core",
+ "md-exchanges",
+ "md-storage",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-tungstenite",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "uuid",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "funding-core"
 version = "0.1.0"
 dependencies = [

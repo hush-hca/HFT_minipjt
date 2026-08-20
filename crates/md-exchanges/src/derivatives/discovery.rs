@@ -13,6 +13,7 @@ use md_core::{
     decimal::{DecimalError, parse_decimal_18},
     model::{AdapterId, CanonicalSymbol, TimestampPrecision, ms_to_us},
 };
+use reqwest::{StatusCode, header::HeaderMap};
 use serde::Deserialize;
 use thiserror::Error;
 use url::Url;
@@ -137,18 +138,61 @@ pub enum DiscoveryError {
         adapter: AdapterId,
         max_pages: usize,
     },
+    #[error("derivative discovery request policy failed for {adapter:?}: {message}")]
+    RequestPolicy { adapter: AdapterId, message: String },
 }
+
+/// Lifecycle callbacks around each physical discovery HTTP request.
+pub trait DiscoveryRequestObserver: Send + Sync {
+    fn before_request(&self, _adapter: AdapterId, _url: &Url) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn complete_request(
+        &self,
+        _adapter: AdapterId,
+        _url: &Url,
+        _headers: &HeaderMap,
+        _status: StatusCode,
+        _bybit_ret_code: Option<i64>,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn abandon_request(&self, _adapter: AdapterId, _url: &Url) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+struct NoopDiscoveryObserver;
+
+impl DiscoveryRequestObserver for NoopDiscoveryObserver {}
 
 pub async fn discover_derivatives(
     client: &reqwest::Client,
     config: &FundingConfig,
     environment: Environment,
 ) -> Result<DerivativeDiscovery, DiscoveryError> {
+    discover_derivatives_observed(client, config, environment, &NoopDiscoveryObserver).await
+}
+
+pub async fn discover_derivatives_observed(
+    client: &reqwest::Client,
+    config: &FundingConfig,
+    environment: Environment,
+    observer: &dyn DiscoveryRequestObserver,
+) -> Result<DerivativeDiscovery, DiscoveryError> {
     let binance_endpoints = endpoints(config, "binance_usdm", environment)?;
     let bybit_endpoints = endpoints(config, "bybit_linear", environment)?;
 
-    let binance = fetch_binance(client, &binance_endpoints.rest_url, &config.assets).await?;
-    let bybit = fetch_bybit(client, &bybit_endpoints.rest_url, &config.assets).await?;
+    let binance = fetch_binance(
+        client,
+        &binance_endpoints.rest_url,
+        &config.assets,
+        observer,
+    )
+    .await?;
+    let bybit = fetch_bybit(client, &bybit_endpoints.rest_url, &config.assets, observer).await?;
 
     Ok(intersect_active(
         &config.assets,
@@ -282,13 +326,16 @@ async fn fetch_binance(
     client: &reqwest::Client,
     base_url: &str,
     requested: &[String],
+    observer: &dyn DiscoveryRequestObserver,
 ) -> Result<VenueInstruments, DiscoveryError> {
     let url = endpoint_url(base_url, "/fapi/v1/exchangeInfo", AdapterId::BinanceUsdm)?;
-    let (mut payload, recv_us) = fetch(client, url, AdapterId::BinanceUsdm).await?;
-    let mut instruments = parse_binance_instruments(&mut payload, requested, recv_us)?;
+    let mut fetched = fetch(client, url, AdapterId::BinanceUsdm, observer).await?;
+    let parsed = parse_binance_instruments(&mut fetched.payload, requested, fetched.recv_us);
+    let mut instruments = finish_decoded(fetched, parsed, observer, None)?;
     let funding_url = endpoint_url(base_url, "/fapi/v1/fundingInfo", AdapterId::BinanceUsdm)?;
-    let (mut funding_payload, _) = fetch(client, funding_url, AdapterId::BinanceUsdm).await?;
-    apply_binance_funding_info(&mut funding_payload, &mut instruments)?;
+    let mut fetched = fetch(client, funding_url, AdapterId::BinanceUsdm, observer).await?;
+    let parsed = apply_binance_funding_info(&mut fetched.payload, &mut instruments);
+    finish_decoded(fetched, parsed, observer, None)?;
     Ok(instruments)
 }
 
@@ -296,6 +343,7 @@ async fn fetch_bybit(
     client: &reqwest::Client,
     base_url: &str,
     requested: &[String],
+    observer: &dyn DiscoveryRequestObserver,
 ) -> Result<VenueInstruments, DiscoveryError> {
     let mut cursor = None;
     let mut seen_cursors = HashSet::new();
@@ -322,9 +370,26 @@ async fn fetch_bybit(
                 query.append_pair("cursor", cursor);
             }
         }
-        let (mut payload, recv_us) = fetch(client, url, AdapterId::BybitLinear).await?;
+        let mut fetched = fetch(client, url, AdapterId::BybitLinear, observer).await?;
         page_count += 1;
-        let (page, next_cursor) = parse_bybit_page(&mut payload, requested, recv_us)?;
+        let decoded = decode_bybit_response(&mut fetched.payload);
+        let response = match decoded {
+            Ok(response) => response,
+            Err(error) => {
+                abandon(&fetched, observer)?;
+                return Err(error);
+            }
+        };
+        let ret_code = response.ret_code;
+        if ret_code != 0 {
+            complete(&fetched, observer, Some(ret_code))?;
+            return Err(DiscoveryError::Decode {
+                adapter: AdapterId::BybitLinear,
+                message: format!("retCode {}: {}", response.ret_code, response.ret_msg),
+            });
+        }
+        let parsed = convert_bybit_page(response, requested, fetched.recv_us);
+        let (page, next_cursor) = finish_decoded(fetched, parsed, observer, Some(0))?;
         result.merge(page);
         match next_cursor {
             Some(next) if seen_cursors.insert(next.clone()) => cursor = Some(next),
@@ -345,23 +410,98 @@ async fn fetch(
     client: &reqwest::Client,
     url: Url,
     adapter: AdapterId,
-) -> Result<(Vec<u8>, i64), DiscoveryError> {
-    let response = client
-        .get(url)
-        .send()
-        .await
-        .map_err(|source| DiscoveryError::Request { adapter, source })?;
+    observer: &dyn DiscoveryRequestObserver,
+) -> Result<FetchedDiscoveryResponse, DiscoveryError> {
+    observer
+        .before_request(adapter, &url)
+        .map_err(|message| DiscoveryError::RequestPolicy { adapter, message })?;
+    let response = client.get(url.clone()).send().await.map_err(|source| {
+        let _ = observer.abandon_request(adapter, &url);
+        DiscoveryError::Request { adapter, source }
+    })?;
     let status = response.status();
+    let headers = response.headers().clone();
     if !status.is_success() {
+        observer
+            .complete_request(adapter, &url, &headers, status, None)
+            .map_err(|message| DiscoveryError::RequestPolicy { adapter, message })?;
         return Err(DiscoveryError::HttpStatus { adapter, status });
     }
     let payload = response
         .bytes()
         .await
-        .map_err(|source| DiscoveryError::Request { adapter, source })?
+        .map_err(|source| {
+            let _ = observer.abandon_request(adapter, &url);
+            DiscoveryError::Request { adapter, source }
+        })?
         .to_vec();
     let local_recv_ts_us = unix_time_us();
-    Ok((payload, local_recv_ts_us))
+    Ok(FetchedDiscoveryResponse {
+        adapter,
+        url,
+        headers,
+        status,
+        payload,
+        recv_us: local_recv_ts_us,
+    })
+}
+
+struct FetchedDiscoveryResponse {
+    adapter: AdapterId,
+    url: Url,
+    headers: HeaderMap,
+    status: StatusCode,
+    payload: Vec<u8>,
+    recv_us: i64,
+}
+
+fn finish_decoded<T>(
+    fetched: FetchedDiscoveryResponse,
+    decoded: Result<T, DiscoveryError>,
+    observer: &dyn DiscoveryRequestObserver,
+    bybit_ret_code: Option<i64>,
+) -> Result<T, DiscoveryError> {
+    match decoded {
+        Ok(value) => {
+            complete(&fetched, observer, bybit_ret_code)?;
+            Ok(value)
+        }
+        Err(error) => {
+            abandon(&fetched, observer)?;
+            Err(error)
+        }
+    }
+}
+
+fn complete(
+    fetched: &FetchedDiscoveryResponse,
+    observer: &dyn DiscoveryRequestObserver,
+    bybit_ret_code: Option<i64>,
+) -> Result<(), DiscoveryError> {
+    observer
+        .complete_request(
+            fetched.adapter,
+            &fetched.url,
+            &fetched.headers,
+            fetched.status,
+            bybit_ret_code,
+        )
+        .map_err(|message| DiscoveryError::RequestPolicy {
+            adapter: fetched.adapter,
+            message,
+        })
+}
+
+fn abandon(
+    fetched: &FetchedDiscoveryResponse,
+    observer: &dyn DiscoveryRequestObserver,
+) -> Result<(), DiscoveryError> {
+    observer
+        .abandon_request(fetched.adapter, &fetched.url)
+        .map_err(|message| DiscoveryError::RequestPolicy {
+            adapter: fetched.adapter,
+            message,
+        })
 }
 
 fn apply_binance_funding_info(
@@ -417,11 +557,22 @@ fn parse_bybit_page(
     requested: &[String],
     local_recv_ts_us: i64,
 ) -> Result<(VenueInstruments, Option<String>), DiscoveryError> {
-    let response: BybitResponse =
-        simd_json::serde::from_slice(payload).map_err(|error| DiscoveryError::Decode {
-            adapter: AdapterId::BybitLinear,
-            message: error.to_string(),
-        })?;
+    let response = decode_bybit_response(payload)?;
+    convert_bybit_page(response, requested, local_recv_ts_us)
+}
+
+fn decode_bybit_response(payload: &mut [u8]) -> Result<BybitResponse, DiscoveryError> {
+    simd_json::serde::from_slice(payload).map_err(|error| DiscoveryError::Decode {
+        adapter: AdapterId::BybitLinear,
+        message: error.to_string(),
+    })
+}
+
+fn convert_bybit_page(
+    response: BybitResponse,
+    requested: &[String],
+    local_recv_ts_us: i64,
+) -> Result<(VenueInstruments, Option<String>), DiscoveryError> {
     if response.ret_code != 0 {
         return Err(DiscoveryError::Decode {
             adapter: AdapterId::BybitLinear,

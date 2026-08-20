@@ -1,8 +1,23 @@
 # Multi-Exchange Arrow Market-Data Collector
 
-This repository is Phase 1 of the HFT mini-project: a headless Rust service that collects public order-book snapshots and individual trade ticks from Upbit Spot, Bithumb Spot, Binance Spot, and Binance USDⓈ-M Futures. It normalizes the feeds and writes hourly Apache Arrow IPC streams.
+This repository contains the completed Phase 1 market-data collector and the Phase 2A public derivatives collector. Phase 1 collects public order-book snapshots and individual trades from Upbit Spot, Bithumb Spot, Binance Spot, and Binance USDⓈ-M. Phase 2A adds Binance USDⓈ-M and Bybit Linear instrument rules, mark/index prices, indicative and settled funding, open interest, venue-specific trader ratios, Bybit reconstructed top-20 books, and executable USDT/KRW quote conversions.
 
-This phase is data infrastructure only. It contains no trading strategy, NBBO/funding/open-interest feature engine, backtest, order placement or cancellation, fill reconciliation, risk engine, or GUI. Do not run a strategy against it as though those components were included.
+This remains data infrastructure only. It contains no strategy decisions, NBBO/microfeature engine, backtest, order placement or cancellation, fill reconciliation, risk engine, paper/testnet execution, or GUI. Do not run a strategy against it as though those components were included.
+
+## Phase 2A public derivatives collection
+
+Build and run a bounded public-only collection:
+
+```powershell
+cargo build --release -p funding-app --offline
+target\release\funding-app.exe collect --config config/funding.toml --duration 60s
+```
+
+Omit `--duration` to run until Ctrl+C. The command surface intentionally contains only `collect`, `--config`, and `--duration`; configuration rejects unknown fields and contains no credentials. Mainnet and testnet instrument discovery are independent. Mainnet public streams are collected, while testnet availability is reported for later execution phases.
+
+The collector starts storage before producers, uses bounded market and derivative channels, then stops producers, drains both channels, finalizes both Arrow routers, recursively validates the dataset, and atomically writes a successful `phase2a-report.json`. Startup, producer, storage, or validation failure triggers the same bounded drain/finalization attempt and may write a failure report whose aggregated `health_errors` explains the incomplete run; that file is operational evidence, not a claim that validation succeeded. Existing reports are replaced directly with the platform atomic-replace primitive: Unix syncs the temporary file, renames over the target, and syncs the parent directory; Windows uses `ReplaceFileW` for an existing report and write-through `MoveFileExW` for first publication. There is no target-away rename window. The report includes requested/eligible/excluded symbols for both environments, stable reason codes, per-family counts, reconnect/sequence-gap/reject/staleness/rate-budget counters, scheduler obligations, measured public-network attempts and credential-policy violations, and finalized paths. `sequence_gaps` counts only order/ticker sequence continuity failures; timestamp regressions remain parser rejects.
+
+Current official Binance top-trader ratio endpoints require an API key. Phase 2A does not call them and reports `BINANCE_TOP_TRADER_REQUIRES_API_KEY`; Bybit's public long/short ratio supplies the collected `trader_ratio` family. No credential support is added as a workaround.
 
 ## What it produces
 
@@ -194,6 +209,7 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --offline -- -D warnings
 cargo test --workspace --offline
 cargo build --release -p collector --offline
+cargo build --workspace --release --offline
 ```
 
 The deterministic suite includes fixture parsers, fake REST/WebSocket servers, storage rotation/recovery/validation, shutdown, and end-to-end fake collection. A passing deterministic suite is not a claim that a live smoke test ran or passed.
