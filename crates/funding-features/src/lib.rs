@@ -10,3 +10,4 @@ pub mod book;
 pub mod flow;
 pub mod metadata;
 pub mod opportunity;
+pub mod replay;

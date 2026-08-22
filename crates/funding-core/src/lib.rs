@@ -6,3 +6,4 @@ pub mod meta;
 pub mod metadata;
 pub mod opportunity;
 pub mod public;
+pub mod replay;

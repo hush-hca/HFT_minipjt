@@ -11,4 +11,5 @@ funding-core = { path = "../funding-core" }
 md-core = { path = "../md-core" }
 num-bigint = "0.4.6"
 num-traits = "0.2.19"
+ring = "0.17"
 uuid = "1.24.1"
