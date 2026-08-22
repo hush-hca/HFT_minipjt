@@ -5,7 +5,11 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::config::ExactDecimal;
+use crate::{
+    config::ExactDecimal,
+    feature::{BasisFeature, NamedPrice, NbboQuote},
+    metadata::FundingMetadataFeature,
+};
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -15,9 +19,17 @@ pub enum FeeSource {
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FeeLiquidity {
+    Maker,
+    Taker,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
 pub struct FeeAssumption {
     pub rate: ExactDecimal,
     pub source: FeeSource,
+    pub liquidity: FeeLiquidity,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Error)]
@@ -29,14 +41,22 @@ pub enum FeeAssumptionError {
 }
 
 impl FeeAssumption {
-    pub fn new(rate: ExactDecimal, source: FeeSource) -> Result<Self, FeeAssumptionError> {
+    pub fn new(
+        rate: ExactDecimal,
+        source: FeeSource,
+        liquidity: FeeLiquidity,
+    ) -> Result<Self, FeeAssumptionError> {
         if rate.scaled() <= 0 {
             return Err(FeeAssumptionError::NonPositiveRate);
         }
         if rate.scaled() > ExactDecimal::SCALE {
             return Err(FeeAssumptionError::RateAboveOne);
         }
-        Ok(Self { rate, source })
+        Ok(Self {
+            rate,
+            source,
+            liquidity,
+        })
     }
 }
 
@@ -49,6 +69,14 @@ pub enum CapacitySource {
     BookDepth,
     RiskLimit,
     AuthenticatedMargin,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CapacityLeg {
+    Long,
+    Short,
+    Pair,
 }
 
 impl CapacitySource {
@@ -74,6 +102,9 @@ pub enum CapacityEvidenceValidity {
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct CapacityEvidence {
     pub source: CapacitySource,
+    pub venue: Option<AdapterId>,
+    pub leg: CapacityLeg,
+    pub symbol: Option<CanonicalSymbol>,
     pub capacity_base: Option<ExactDecimal>,
     pub capacity_quote: Option<ExactDecimal>,
     pub source_event_id: Option<Uuid>,
@@ -81,11 +112,19 @@ pub struct CapacityEvidence {
     pub validity: CapacityEvidenceValidity,
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, Serialize, Deserialize)]
+pub struct CapacityEvidenceKey {
+    pub source: CapacitySource,
+    pub venue: Option<AdapterId>,
+    pub leg: CapacityLeg,
+}
+
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct CapacityAssessment {
     pub capacity_base: ExactDecimal,
     pub capacity_quote: ExactDecimal,
     pub binding_sources: Vec<CapacitySource>,
+    pub binding_evidence: Vec<CapacityEvidenceKey>,
     pub evidence: Vec<CapacityEvidence>,
 }
 
@@ -105,7 +144,7 @@ impl CapacityAssessment {
     pub fn new(
         capacity_base: ExactDecimal,
         capacity_quote: ExactDecimal,
-        binding_sources: Vec<CapacitySource>,
+        binding_evidence: Vec<CapacityEvidenceKey>,
         evidence: Vec<CapacityEvidence>,
     ) -> Result<Self, CapacityAssessmentError> {
         if capacity_base.scaled() <= 0 || capacity_quote.scaled() <= 0 {
@@ -116,24 +155,33 @@ impl CapacityAssessment {
         }
         let sources = evidence
             .iter()
-            .map(|item| item.source)
+            .map(|item| (item.source, item.venue, item.leg))
             .collect::<HashSet<_>>();
         if sources.len() != evidence.len() {
             return Err(CapacityAssessmentError::DuplicateEvidence);
         }
-        if binding_sources.is_empty()
-            || binding_sources.iter().any(|source| {
+        if binding_evidence.is_empty()
+            || binding_evidence.iter().any(|key| {
                 !evidence.iter().any(|item| {
-                    item.source == *source
+                    item.source == key.source
+                        && item.venue == key.venue
+                        && item.leg == key.leg
                         && matches!(item.validity, CapacityEvidenceValidity::Available)
                 })
             })
         {
             return Err(CapacityAssessmentError::MissingBindingEvidence);
         }
+        let mut binding_sources = Vec::new();
+        for key in &binding_evidence {
+            if !binding_sources.contains(&key.source) {
+                binding_sources.push(key.source);
+            }
+        }
         Ok(Self {
             capacity_base,
             capacity_quote,
+            binding_evidence,
             binding_sources,
             evidence,
         })
@@ -174,6 +222,38 @@ pub struct PnlBreakdown {
     pub funding_error_reserve: i128,
     pub leg_risk_reserve: i128,
     pub residual_mark_to_market: i128,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SettlementLeg {
+    Long,
+    Short,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SettlementInclusion {
+    Included,
+    OutsideHoldingWindow,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SettlementCashflowEvidence {
+    pub venue: AdapterId,
+    pub leg: SettlementLeg,
+    pub settlement_ts_us: i64,
+    pub inclusion: SettlementInclusion,
+    pub announced_rate: ExactDecimal,
+    pub mark_price: ExactDecimal,
+    pub funding_notional_quote: ExactDecimal,
+    pub cashflow_quote: ExactDecimal,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RiskNotionalConvention {
+    TotalEntryGrossQuote,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Error)]
@@ -234,6 +314,21 @@ pub struct Opportunity {
     pub short_venue: AdapterId,
     pub long_venue: AdapterId,
     pub capacity: CapacityAssessment,
+    pub requested_base: ExactDecimal,
+    pub long_entry: NbboQuote,
+    pub short_entry: NbboQuote,
+    pub long_mark: NamedPrice,
+    pub short_mark: NamedPrice,
+    pub long_funding: FundingMetadataFeature,
+    pub short_funding: FundingMetadataFeature,
+    pub entry_basis: BasisFeature,
+    pub settlements: Vec<SettlementCashflowEvidence>,
+    pub holding_end_ts_us: i64,
+    pub risk_notional_quote: ExactDecimal,
+    pub risk_notional_convention: RiskNotionalConvention,
+    pub cost_model: CostModel,
+    pub quote_asset: String,
+    pub decimal_scale: u8,
     pub raw_gap: ExactDecimal,
     pub hourly_gap: ExactDecimal,
     pub indicative_apr: ExactDecimal,
@@ -241,7 +336,57 @@ pub struct Opportunity {
     pub expected_pnl: PnlBreakdown,
     pub expected_net_pnl: i128,
     pub expected_net_bps: ExactDecimal,
+    pub minimum_net_bps: ExactDecimal,
+    pub gross_edge_quote: ExactDecimal,
+    pub net_edge_quote: ExactDecimal,
     pub decision_ts_us: i64,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OpportunityRejectionReason {
+    InvalidHoldingWindow,
+    InvalidEntryBasis,
+    IdentityMismatch,
+    NonPositiveRequestedBase,
+    RequestedQuantityMismatch,
+    MissingNotionalEvidence,
+    FundingEvidenceMismatch,
+    InvalidCostModel,
+    FutureEvidence {
+        source_ts_us: i64,
+        decision_ts_us: i64,
+    },
+    StaleEvidence {
+        age_us: i64,
+        limit_us: i64,
+    },
+    InsufficientCapacity {
+        requested_base: ExactDecimal,
+        capacity_base: ExactDecimal,
+    },
+    NoAnnouncedSettlementInWindow,
+    ArithmeticOverflow,
+    NetEdgeNotPositive,
+    NetEdgeBelowMinimum {
+        net_bps: ExactDecimal,
+        minimum_bps: ExactDecimal,
+    },
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct OpportunityRejection {
+    pub symbol: Option<CanonicalSymbol>,
+    pub decision_ts_us: i64,
+    pub reason: OpportunityRejectionReason,
+    pub capacity_evidence: Vec<CapacityEvidence>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CandidateEvaluation {
+    Eligible(Box<Opportunity>),
+    Rejected(Box<OpportunityRejection>),
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]

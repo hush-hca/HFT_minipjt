@@ -143,6 +143,74 @@ fn gap_rejects_non_indicative_or_tampered_schedule_evidence() {
 }
 
 #[test]
+fn gap_revalidates_causal_freshness_evidence_for_each_leg() {
+    let symbol = CanonicalSymbol::new("LINK", "USDT");
+    let mut aligner = MetadataAligner::new();
+    for venue in [AdapterId::BinanceUsdm, AdapterId::BybitLinear] {
+        aligner
+            .observe_funding(funding(
+                venue,
+                symbol.clone(),
+                ONE / 10_000,
+                28_800,
+                DECISION_US - 1_050,
+                DECISION_US + 100,
+            ))
+            .unwrap();
+    }
+    let valid_short = aligner
+        .funding_feature(AdapterId::BinanceUsdm, &symbol, DECISION_US, 1_000)
+        .unwrap();
+    let valid_long = aligner
+        .funding_feature(AdapterId::BybitLinear, &symbol, DECISION_US, 1_000)
+        .unwrap();
+
+    assert!(funding_gap(valid_short.clone(), valid_long.clone(), DECISION_US).is_ok());
+
+    let mut short = valid_short.clone();
+    short.decision_ts_us -= 1;
+    assert_eq!(
+        funding_gap(short, valid_long.clone(), DECISION_US),
+        Err(MetadataInvalidReason::DecisionTimestampMismatch)
+    );
+
+    let mut short = valid_short.clone();
+    short.freshness_limit_us = -1;
+    assert_eq!(
+        funding_gap(short, valid_long.clone(), DECISION_US),
+        Err(MetadataInvalidReason::InvalidFreshnessLimit { limit_us: -1 })
+    );
+
+    let mut short = valid_short.clone();
+    short.age_us -= 1;
+    assert_eq!(
+        funding_gap(short, valid_long.clone(), DECISION_US),
+        Err(MetadataInvalidReason::FundingEvidenceMismatch)
+    );
+
+    let mut short = valid_short.clone();
+    short.freshness_limit_us = 999;
+    assert_eq!(
+        funding_gap(short, valid_long.clone(), DECISION_US),
+        Err(MetadataInvalidReason::Stale {
+            age_us: 1_000,
+            limit_us: 999,
+        })
+    );
+
+    let mut short = valid_short;
+    short.source.local_recv_ts_us = DECISION_US + 1;
+    short.age_us = -1;
+    assert_eq!(
+        funding_gap(short, valid_long, DECISION_US),
+        Err(MetadataInvalidReason::FutureTimestamp {
+            source_ts_us: DECISION_US + 1,
+            decision_ts_us: DECISION_US,
+        })
+    );
+}
+
+#[test]
 fn freshness_boundary_is_inclusive_and_stale_and_future_are_explicit() {
     let symbol = CanonicalSymbol::new("ETH", "USDT");
     let mut aligner = MetadataAligner::new();

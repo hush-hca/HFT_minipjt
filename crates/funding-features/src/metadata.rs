@@ -342,6 +342,14 @@ fn validate_gap_leg(
             venue: leg.source.adapter,
         });
     }
+    if leg.decision_ts_us != decision_ts_us {
+        return Err(MetadataInvalidReason::DecisionTimestampMismatch);
+    }
+    if leg.freshness_limit_us < 0 {
+        return Err(MetadataInvalidReason::InvalidFreshnessLimit {
+            limit_us: leg.freshness_limit_us,
+        });
+    }
     if leg.interval_secs == 0 {
         return Err(MetadataInvalidReason::InvalidFundingInterval);
     }
@@ -355,6 +363,18 @@ fn validate_gap_leg(
         return Err(MetadataInvalidReason::FutureTimestamp {
             source_ts_us: leg.source.local_recv_ts_us.max(leg.source.effective_ts_us),
             decision_ts_us,
+        });
+    }
+    let age_us = decision_ts_us
+        .checked_sub(leg.source.local_recv_ts_us)
+        .ok_or(MetadataInvalidReason::ArithmeticOverflow)?;
+    if leg.age_us != age_us {
+        return Err(MetadataInvalidReason::FundingEvidenceMismatch);
+    }
+    if age_us > leg.freshness_limit_us {
+        return Err(MetadataInvalidReason::Stale {
+            age_us,
+            limit_us: leg.freshness_limit_us,
         });
     }
     Ok(())

@@ -8,8 +8,9 @@ use funding_core::{
         StructuralBookValidity, TradeDedupePolicy,
     },
     opportunity::{
-        CapacityAssessment, CapacityEvidence, CapacityEvidenceValidity, CapacitySource, CostModel,
-        FeeAssumption, FeeSource, OpportunityExclusion, PnlBreakdown, VenueCostModel,
+        CapacityAssessment, CapacityEvidence, CapacityEvidenceKey, CapacityEvidenceValidity,
+        CapacityLeg, CapacitySource, CostModel, FeeAssumption, FeeLiquidity, FeeSource,
+        OpportunityExclusion, PnlBreakdown, VenueCostModel,
     },
     public::FundingIntervalProvenance,
 };
@@ -188,8 +189,13 @@ fn funding_slots_preserve_interval_provenance_initial_and_timestamp_source() {
 
 #[test]
 fn cost_pnl_and_capacity_keep_every_component_and_limit_evidence() {
-    let fee = FeeAssumption::new(exact(400_000_000_000_000), FeeSource::ExplicitConfig).unwrap();
-    assert!(FeeAssumption::new(exact(0), FeeSource::ExplicitConfig).is_err());
+    let fee = FeeAssumption::new(
+        exact(400_000_000_000_000),
+        FeeSource::ExplicitConfig,
+        FeeLiquidity::Taker,
+    )
+    .unwrap();
+    assert!(FeeAssumption::new(exact(0), FeeSource::ExplicitConfig, FeeLiquidity::Taker).is_err());
     let venue = VenueCostModel {
         entry_fee: fee,
         exit_fee: fee,
@@ -222,6 +228,9 @@ fn cost_pnl_and_capacity_keep_every_component_and_limit_evidence() {
     let evidence = vec![
         CapacityEvidence {
             source: CapacitySource::BookDepth,
+            venue: Some(AdapterId::BinanceUsdm),
+            leg: CapacityLeg::Short,
+            symbol: Some(CanonicalSymbol::new("BTC", "USDT")),
             capacity_base: Some(exact(ONE)),
             capacity_quote: Some(exact(60_000 * ONE)),
             source_event_id: Some(Uuid::now_v7()),
@@ -230,6 +239,9 @@ fn cost_pnl_and_capacity_keep_every_component_and_limit_evidence() {
         },
         CapacityEvidence {
             source: CapacitySource::ConfiguredResearchLimit,
+            venue: None,
+            leg: CapacityLeg::Pair,
+            symbol: Some(CanonicalSymbol::new("BTC", "USDT")),
             capacity_base: None,
             capacity_quote: Some(exact(100 * ONE)),
             source_event_id: None,
@@ -240,7 +252,11 @@ fn cost_pnl_and_capacity_keep_every_component_and_limit_evidence() {
     let capacity = CapacityAssessment::new(
         exact(ONE / 600),
         exact(100 * ONE),
-        vec![CapacitySource::ConfiguredResearchLimit],
+        vec![CapacityEvidenceKey {
+            source: CapacitySource::ConfiguredResearchLimit,
+            venue: None,
+            leg: CapacityLeg::Pair,
+        }],
         evidence,
     )
     .unwrap();
