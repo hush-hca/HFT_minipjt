@@ -17,6 +17,7 @@ pub enum FundingSlotKind {
 #[serde(rename_all = "snake_case")]
 pub enum FundingTimestampSource {
     VenueAnnounced,
+    VenueReportedSettlement,
     IntervalDerived,
 }
 
@@ -96,7 +97,7 @@ pub enum FundingCalendarError {
     NonPositiveTimestamp,
     #[error("funding interval must be positive")]
     NonPositiveInterval,
-    #[error("funding calendar contains a duplicate venue, symbol, and timestamp")]
+    #[error("funding calendar contains a duplicate venue, symbol, timestamp, and kind")]
     DuplicateSlot,
 }
 
@@ -114,7 +115,12 @@ impl FundingCalendar {
 
         let mut identities = HashSet::with_capacity(slots.len());
         for slot in &slots {
-            if !identities.insert((slot.venue, slot.symbol.clone(), slot.settlement_ts_us)) {
+            if !identities.insert((
+                slot.venue,
+                slot.symbol.clone(),
+                slot.settlement_ts_us,
+                slot.kind,
+            )) {
                 return Err(FundingCalendarError::DuplicateSlot);
             }
         }
@@ -124,12 +130,22 @@ impl FundingCalendar {
                 .then_with(|| adapter_order(left.venue).cmp(&adapter_order(right.venue)))
                 .then_with(|| left.symbol.base.cmp(&right.symbol.base))
                 .then_with(|| left.symbol.quote.cmp(&right.symbol.quote))
+                .then_with(|| {
+                    funding_slot_kind_order(left.kind).cmp(&funding_slot_kind_order(right.kind))
+                })
         });
         Ok(Self { slots })
     }
 
     pub fn slots(&self) -> &[FundingSlot] {
         &self.slots
+    }
+}
+
+fn funding_slot_kind_order(kind: FundingSlotKind) -> u8 {
+    match kind {
+        FundingSlotKind::Estimated => 0,
+        FundingSlotKind::Settled => 1,
     }
 }
 

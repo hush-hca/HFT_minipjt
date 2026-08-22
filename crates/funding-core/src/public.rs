@@ -30,7 +30,7 @@ pub enum OpenInterestUnit {
     BaseAsset,
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TraderMetricKind {
     BinanceTopAccountRatio,

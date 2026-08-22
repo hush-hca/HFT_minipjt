@@ -307,3 +307,44 @@ fn calendar_rejects_invalid_interval_duplicate_and_nonpositive_slots() {
     );
     assert!(FundingCalendar::new(vec![invalid]).is_err());
 }
+
+#[test]
+fn calendar_allows_estimate_and_reported_settlement_at_the_same_slot() {
+    use funding_core::calendar::FundingSlotKind;
+
+    let venue = AdapterId::BinanceUsdm;
+    let symbol = CanonicalSymbol::new("BTC", "USDT");
+    let timestamp = 1_800_000_000_000_000;
+    let estimate = FundingSlot::estimated(
+        venue,
+        symbol.clone(),
+        timestamp,
+        100_000_000_000_000,
+        FundingSlotEvidence {
+            interval_secs: 28_800,
+            interval_provenance: FundingIntervalProvenance::VenuePayload,
+            initial: true,
+            timestamp_source: FundingTimestampSource::VenueAnnounced,
+        },
+    );
+    let settled = FundingSlot::settled(
+        venue,
+        symbol,
+        timestamp,
+        90_000_000_000_000,
+        FundingSlotEvidence {
+            interval_secs: 28_800,
+            interval_provenance: FundingIntervalProvenance::VenuePayload,
+            initial: true,
+            timestamp_source: FundingTimestampSource::VenueReportedSettlement,
+        },
+    );
+    let calendar = FundingCalendar::new(vec![estimate, settled]).unwrap();
+    assert_eq!(calendar.slots().len(), 2);
+    assert!(
+        calendar
+            .slots()
+            .iter()
+            .any(|slot| slot.kind == FundingSlotKind::Settled)
+    );
+}
