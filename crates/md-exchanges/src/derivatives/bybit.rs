@@ -297,7 +297,10 @@ pub fn parse_funding_history_with_rules(
     recv_us: i64,
     rules: FundingRules,
 ) -> Result<Vec<DerivativeEvent>, DerivativeParseError> {
-    validate_rules(rules, true)?;
+    // Bybit's public instrument feed provides the funding interval but does
+    // not provide per-symbol funding-rate bounds. Missing bounds therefore
+    // mean "not published", not an invalid rule set.
+    validate_rules(rules, false)?;
     let schedule = FundingSchedule::new(vec![super::binance::EffectiveFundingRule {
         effective_from_ts_us: 0,
         rules,

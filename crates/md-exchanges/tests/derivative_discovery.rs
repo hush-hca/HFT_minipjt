@@ -202,12 +202,13 @@ async fn network_discovery_uses_the_selected_environment_only() {
         )
         .is_ok()
     );
-    assert!(matches!(
-        md_exchanges::derivatives::binance::FundingRules::from_instrument(
-            &result.eligible[1].binance
-        ),
-        Err(md_exchanges::derivatives::binance::DerivativeParseError::MissingRateBounds)
-    ));
+    let ordinary = md_exchanges::derivatives::binance::FundingRules::from_instrument(
+        &result.eligible[1].binance,
+    )
+    .unwrap();
+    assert_eq!(ordinary.interval_secs, 28_800);
+    assert_eq!(ordinary.rate_floor, None);
+    assert_eq!(ordinary.rate_cap, None);
     assert_eq!(result.excluded[0].code, "TESTNET_UNAVAILABLE");
     binance_task.await.unwrap();
     bybit_task.await.unwrap();

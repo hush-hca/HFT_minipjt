@@ -55,7 +55,15 @@ impl BybitLinearParser {
         }
         let topic = required_string(root, "topic")?;
         if topic == format!("orderbook.50.{}", self.source_symbol) {
-            self.parse_book(root, topic, recv_us, raw_size_bytes)
+            let result = self.parse_book(root, topic, recv_us, raw_size_bytes);
+            // A book frame can mutate the reconstructed state before a later
+            // validation rejects it (for example insufficient depth).  Never
+            // let a following delta build on that partial state: force the
+            // websocket supervisor to obtain a fresh authoritative snapshot.
+            if result.is_err() {
+                self.reset();
+            }
+            result
         } else if topic == format!("publicTrade.{}", self.source_symbol) {
             self.parse_trades(root, topic, recv_us, raw_size_bytes)
         } else {

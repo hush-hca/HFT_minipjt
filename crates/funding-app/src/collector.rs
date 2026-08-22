@@ -22,7 +22,10 @@ use md_core::model::{
     AdapterId, BookSnapshot, CanonicalSymbol, EventMeta, NormalizedEvent, PriceLevel,
     TimestampPrecision,
 };
-use md_exchanges::derivatives::binance::{self, FundingRules, PublicCapability};
+use md_exchanges::derivatives::binance::{
+    self, EffectiveFundingRule, FundingHistoryRules, FundingRules, FundingSchedule,
+    LegacyRateTypePolicy, PublicCapability,
+};
 use md_exchanges::derivatives::bybit::{self, BybitTickerParser};
 use md_exchanges::derivatives::discovery::{
     DerivativeDiscovery, DiscoveryRequestObserver, Environment, IneligibleInstrument,
@@ -58,6 +61,54 @@ const QUOTE_STALE_AFTER: Duration = Duration::from_secs(5);
 const BINANCE_TOP_TRADER_CODE: &str = "BINANCE_TOP_TRADER_REQUIRES_API_KEY";
 const NETWORK_TIMEOUT: Duration = Duration::from_secs(10);
 const WS_READ_TIMEOUT: Duration = Duration::from_secs(120);
+
+type FundingRuleStore =
+    Arc<Mutex<std::collections::HashMap<(AdapterId, CanonicalSymbol), FundingRules>>>;
+
+fn funding_rule_store(discovery: &DerivativeDiscovery) -> Result<FundingRuleStore> {
+    let mut rules = std::collections::HashMap::new();
+    for common in &discovery.eligible {
+        rules.insert(
+            (AdapterId::BinanceUsdm, common.symbol.clone()),
+            FundingRules::from_instrument(&common.binance)?,
+        );
+        rules.insert(
+            (AdapterId::BybitLinear, common.symbol.clone()),
+            FundingRules::from_instrument(&common.bybit)?,
+        );
+    }
+    Ok(Arc::new(Mutex::new(rules)))
+}
+
+fn update_funding_rules(store: &FundingRuleStore, discovery: &DerivativeDiscovery) -> Result<()> {
+    let mut locked = store
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for common in &discovery.eligible {
+        locked.insert(
+            (AdapterId::BinanceUsdm, common.symbol.clone()),
+            FundingRules::from_instrument(&common.binance)?,
+        );
+        locked.insert(
+            (AdapterId::BybitLinear, common.symbol.clone()),
+            FundingRules::from_instrument(&common.bybit)?,
+        );
+    }
+    Ok(())
+}
+
+fn current_funding_rules(
+    store: &FundingRuleStore,
+    venue: AdapterId,
+    symbol: &CanonicalSymbol,
+) -> FundingRules {
+    store
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&(venue, symbol.clone()))
+        .copied()
+        .unwrap_or_default()
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct SyntheticPublicSource {
@@ -266,6 +317,48 @@ impl Phase2Collector {
             }
         }
 
+        // Completion is deliberately derived from this run's in-memory
+        // producer metrics, never by scanning a pre-existing output tree.
+        // This prevents an earlier Arrow hour from masking a failed startup.
+        let completion_snapshot = metrics.snapshot();
+        let missing_families: Vec<_> = [
+            "instrument",
+            "mark_index",
+            "funding_estimate",
+            "funding_settlement",
+            "open_interest",
+            "trader_ratio",
+            "quote_conversion",
+        ]
+        .into_iter()
+        .filter(|family| {
+            completion_snapshot
+                .per_family
+                .get(*family)
+                .is_none_or(|count| count.events == 0)
+        })
+        .collect();
+        if !missing_families.is_empty() {
+            let error = anyhow!(
+                "run completion gate failed; missing event families: {}",
+                missing_families.join(", ")
+            );
+            metrics.error(error.to_string());
+            terminal_error.get_or_insert(error);
+        }
+        let missing_evidence = expected_run_evidence(&self.config, &basis)
+            .into_iter()
+            .filter(|identity| !completion_snapshot.event_identities.contains(identity))
+            .collect::<Vec<_>>();
+        if !missing_evidence.is_empty() {
+            let error = anyhow!(
+                "run completion gate failed; missing venue/symbol evidence: {}",
+                missing_evidence.join(", ")
+            );
+            metrics.error(error.to_string());
+            terminal_error.get_or_insert(error);
+        }
+
         match md_storage::validate_path(&self.config.output_root) {
             Ok(validation) if validation.is_valid() => {}
             Ok(validation) => {
@@ -471,6 +564,7 @@ async fn prepare_network(
     )
     .await?;
     basis.apply(Environment::Mainnet, &mainnet);
+    let funding_rules = funding_rule_store(&mainnet)?;
     match scheduled_discovery(
         &client,
         config,
@@ -515,14 +609,18 @@ async fn prepare_network(
         shutdown: shutdown.clone(),
         metrics: Arc::clone(&metrics),
         settlements: Arc::new(Mutex::new(HashSet::new())),
+        funding_rules: Arc::clone(&funding_rules),
     };
     spawn_instrument_refresh(
-        config.clone(),
-        client.clone(),
-        derivative_tx.clone(),
-        shutdown.clone(),
-        Arc::clone(&metrics),
-        (Arc::clone(&binance_scheduler), Arc::clone(&bybit_scheduler)),
+        InstrumentRefreshContext {
+            config: config.clone(),
+            client: client.clone(),
+            tx: derivative_tx.clone(),
+            shutdown: shutdown.clone(),
+            metrics: Arc::clone(&metrics),
+            schedulers: (Arc::clone(&binance_scheduler), Arc::clone(&bybit_scheduler)),
+            funding_rules: Arc::clone(&funding_rules),
+        },
         producers,
     );
     let eligible_count = mainnet.eligible.len();
@@ -532,7 +630,7 @@ async fn prepare_network(
                 symbol: common.symbol.clone(),
                 endpoints: config.venues["binance_usdm"].mainnet.clone(),
                 venue: AdapterId::BinanceUsdm,
-                binance_rules: Some(FundingRules::from_instrument(&common.binance)?),
+                funding_rules: Arc::clone(&funding_rules),
             },
             derivative_tx.clone(),
             shutdown.clone(),
@@ -544,7 +642,7 @@ async fn prepare_network(
                 symbol: common.symbol.clone(),
                 endpoints: config.venues["bybit_linear"].mainnet.clone(),
                 venue: AdapterId::BybitLinear,
-                binance_rules: None,
+                funding_rules: Arc::clone(&funding_rules),
             },
             derivative_tx.clone(),
             shutdown.clone(),
@@ -611,16 +709,29 @@ async fn prepare_network(
     Ok(())
 }
 
-fn spawn_instrument_refresh(
+struct InstrumentRefreshContext {
     config: FundingConfig,
     client: PublicHttpClient,
     tx: mpsc::Sender<DerivativeEvent>,
     shutdown: CancellationToken,
     metrics: Arc<Metrics>,
     schedulers: (Arc<RestScheduler>, Arc<RestScheduler>),
+    funding_rules: FundingRuleStore,
+}
+
+fn spawn_instrument_refresh(
+    context: InstrumentRefreshContext,
     producers: &mut JoinSet<Result<()>>,
 ) {
-    let (binance_scheduler, bybit_scheduler) = schedulers;
+    let InstrumentRefreshContext {
+        config,
+        client,
+        tx,
+        shutdown,
+        metrics,
+        schedulers: (binance_scheduler, bybit_scheduler),
+        funding_rules,
+    } = context;
     producers.spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(
             config.poll.instrument_secs.max(900),
@@ -631,11 +742,14 @@ fn spawn_instrument_refresh(
             tokio::select! {
                 () = shutdown.cancelled() => return Ok(()),
                 _ = interval.tick() => match scheduled_discovery(&client, &config, Environment::Mainnet, &binance_scheduler, &bybit_scheduler, &shutdown, &metrics).await {
-                    Ok(discovery) => for common in discovery.eligible {
+                    Ok(discovery) => {
+                        update_funding_rules(&funding_rules, &discovery)?;
+                        for common in discovery.eligible {
                         if tx.send(DerivativeEvent::Instrument(Box::new(common.binance))).await.is_err()
                             || tx.send(DerivativeEvent::Instrument(Box::new(common.bybit))).await.is_err()
                         {
                             return Ok(());
+                        }
                         }
                     },
                     Err(error) => metrics.error(format!("instrument refresh failed: {error}")),
@@ -803,7 +917,7 @@ struct DerivativeWsSpec {
     symbol: CanonicalSymbol,
     endpoints: EndpointSet,
     venue: AdapterId,
-    binance_rules: Option<FundingRules>,
+    funding_rules: FundingRuleStore,
 }
 
 fn spawn_derivative_ws(
@@ -818,7 +932,7 @@ fn spawn_derivative_ws(
             symbol,
             endpoints,
             venue,
-            binance_rules,
+            funding_rules,
         } = spec;
         let source_symbol = format!("{}{}", symbol.base, symbol.quote);
         let mut reconnect_failures = 0_u32;
@@ -888,7 +1002,7 @@ fn spawn_derivative_ws(
                                 AdapterId::BinanceUsdm => binance::parse_mark_funding_with_rules(
                                     &mut bytes,
                                     recv,
-                                    binance_rules.expect("Binance runtime has discovered funding rules"),
+                                    current_funding_rules(&funding_rules, venue, &symbol),
                                 ),
                                 AdapterId::BybitLinear => bybit_parser.parse(&mut bytes, recv),
                                 _ => unreachable!(),
@@ -1079,6 +1193,7 @@ struct PollContext {
     shutdown: CancellationToken,
     metrics: Arc<Metrics>,
     settlements: Arc<Mutex<HashSet<(AdapterId, CanonicalSymbol, i64)>>>,
+    funding_rules: FundingRuleStore,
 }
 
 fn spawn_rest_pollers(
@@ -1195,17 +1310,7 @@ async fn poll_loop(
     }
     let mut failure_streak = 0_u32;
     loop {
-        let succeeded = match poll_once(
-            &symbol,
-            &base,
-            spec,
-            &context.client,
-            &scheduler,
-            &context.metrics,
-            &context.shutdown,
-        )
-        .await
-        {
+        let succeeded = match poll_once(&symbol, &base, spec, &scheduler, &context).await {
             Ok(events) => {
                 for event in events {
                     if !context.accept_settlement(&event) {
@@ -1305,37 +1410,35 @@ async fn poll_once(
     symbol: &CanonicalSymbol,
     base: &str,
     spec: PollSpec,
-    client: &PublicHttpClient,
     scheduler: &RestScheduler,
-    metrics: &Metrics,
-    shutdown: &CancellationToken,
+    context: &PollContext,
 ) -> Result<Vec<DerivativeEvent>> {
     let permit = match scheduler.acquire(RequestClass::MarketData, spec.weight, Instant::now()) {
         Ok(permit) => permit,
         Err(error) => {
-            metrics.budget_reject();
+            context.metrics.budget_reject();
             return Err(error.into());
         }
     };
     let venue_symbol = format!("{}{}", symbol.base, symbol.quote);
     let url = rest_url(base, spec.venue, spec.kind, &venue_symbol)?;
-    let request = client.get(url)?;
+    let request = context.client.get(url)?;
     let response = tokio::select! {
-        () = shutdown.cancelled() => {
+        () = context.shutdown.cancelled() => {
             scheduler.abandon_permit(&permit)?;
-            metrics.abandoned();
+            context.metrics.abandoned();
             return Err(anyhow!("public REST request cancelled"));
         }
         response = tokio::time::timeout(NETWORK_TIMEOUT, request.send()) => match response {
             Ok(Ok(response)) => response,
             Ok(Err(error)) => {
                 scheduler.abandon_permit(&permit)?;
-                metrics.abandoned();
+                context.metrics.abandoned();
                 return Err(error.into());
             }
             Err(_) => {
                 scheduler.abandon_permit(&permit)?;
-                metrics.abandoned();
+                context.metrics.abandoned();
                 return Err(anyhow!("public REST request timed out"));
             }
         }
@@ -1343,9 +1446,10 @@ async fn poll_once(
     let status = response.status();
     let headers = response.headers().clone();
     if !status.is_success() {
-        let signal = complete_response(scheduler, &permit, &headers, status, None, metrics)?;
+        let signal =
+            complete_response(scheduler, &permit, &headers, status, None, &context.metrics)?;
         if signal {
-            metrics.rate_block();
+            context.metrics.rate_block();
             return Err(RateLimitedPoll {
                 until: scheduler.snapshot(Instant::now()).blocked_until,
             }
@@ -1354,21 +1458,21 @@ async fn poll_once(
         bail!("public REST response rejected for {venue_symbol}: status={status}");
     }
     let bytes = tokio::select! {
-        () = shutdown.cancelled() => {
+        () = context.shutdown.cancelled() => {
             scheduler.abandon_permit(&permit)?;
-            metrics.abandoned();
+            context.metrics.abandoned();
             return Err(anyhow!("public REST body read cancelled"));
         }
         bytes = tokio::time::timeout(NETWORK_TIMEOUT, response.bytes()) => match bytes {
             Ok(Ok(bytes)) => bytes,
             Ok(Err(error)) => {
                 scheduler.abandon_permit(&permit)?;
-                metrics.abandoned();
+                context.metrics.abandoned();
                 return Err(error.into());
             }
             Err(_) => {
                 scheduler.abandon_permit(&permit)?;
-                metrics.abandoned();
+                context.metrics.abandoned();
                 return Err(anyhow!("public REST body read timed out"));
             }
         }
@@ -1383,7 +1487,7 @@ async fn poll_once(
     };
     if spec.venue == AdapterId::BybitLinear && bybit_ret_code.is_none() {
         scheduler.abandon_permit(&permit)?;
-        metrics.abandoned();
+        context.metrics.abandoned();
         return Err(anyhow!(
             "Bybit successful REST response has no integer retCode"
         ));
@@ -1395,10 +1499,10 @@ async fn poll_once(
             &headers,
             status,
             bybit_ret_code,
-            metrics,
+            &context.metrics,
         )?;
         if signal {
-            metrics.rate_block();
+            context.metrics.rate_block();
         }
         return Err(RateLimitedPoll {
             until: scheduler.snapshot(Instant::now()).blocked_until,
@@ -1411,7 +1515,17 @@ async fn poll_once(
             binance::parse_open_interest(&mut payload, recv)
         }
         (AdapterId::BinanceUsdm, RestKind::FundingHistory) => {
-            binance::parse_funding_history(&mut payload, recv)
+            binance::parse_funding_history_with_rules(
+                &mut payload,
+                recv,
+                FundingHistoryRules {
+                    schedule: FundingSchedule::new(vec![EffectiveFundingRule {
+                        effective_from_ts_us: 0,
+                        rules: current_funding_rules(&context.funding_rules, spec.venue, symbol),
+                    }])?,
+                    legacy_rate_type: LegacyRateTypePolicy::AcceptMissing,
+                },
+            )
         }
         (AdapterId::BybitLinear, RestKind::OpenInterest) => {
             bybit::parse_open_interest(&mut payload, recv)
@@ -1420,7 +1534,11 @@ async fn poll_once(
             bybit::parse_long_short_ratio(&mut payload, recv)
         }
         (AdapterId::BybitLinear, RestKind::FundingHistory) => {
-            bybit::parse_funding_history(&mut payload, recv)
+            bybit::parse_funding_history_with_rules(
+                &mut payload,
+                recv,
+                current_funding_rules(&context.funding_rules, spec.venue, symbol),
+            )
         }
         _ => return Err(anyhow!("unsupported public REST poll")),
     };
@@ -1428,7 +1546,7 @@ async fn poll_once(
         Ok(events) => events,
         Err(error) => {
             scheduler.abandon_permit(&permit)?;
-            metrics.abandoned();
+            context.metrics.abandoned();
             return Err(error.into());
         }
     };
@@ -1438,10 +1556,10 @@ async fn poll_once(
         &headers,
         status,
         bybit_ret_code,
-        metrics,
+        &context.metrics,
     )?;
     if signal {
-        metrics.rate_block();
+        context.metrics.rate_block();
     }
     Ok(events)
 }
@@ -1558,7 +1676,7 @@ async fn derivative_storage_loop(
     loop {
         tokio::select! {
             event = rx.recv() => match event {
-                Some(event) => { metrics.family(event_family(&event)); router.push(event).await?; }
+                Some(event) => { metrics.event(&event); router.push(event).await?; }
                 None => break,
             },
             _ = flush.tick() => router.flush_due(Instant::now()).await?,
@@ -1619,15 +1737,30 @@ async fn prepare_synthetic(
         detail: "synthetic testnet omission".into(),
     });
     let ts = now_us();
-    for venue in [AdapterId::BinanceUsdm, AdapterId::BybitLinear] {
-        derivative_tx
-            .send(DerivativeEvent::Instrument(Box::new(test_instrument(
-                venue, ts,
-            ))))
-            .await?;
+    for base in ["BTC", "ETH"] {
+        for venue in [AdapterId::BinanceUsdm, AdapterId::BybitLinear] {
+            derivative_tx
+                .send(DerivativeEvent::Instrument(Box::new(test_instrument_for(
+                    venue, base, ts,
+                ))))
+                .await?;
+            for event in synthetic_derivative_events(venue, base, ts) {
+                derivative_tx.send(event).await?;
+            }
+        }
     }
-    let meta = test_meta(AdapterId::BybitLinear, "BTC", "USDT", ts);
-    let events = vec![
+    for venue in [AdapterId::UpbitSpot, AdapterId::BithumbSpot] {
+        market_tx.send(test_quote_book(venue, ts)).await?;
+    }
+    metrics.reconnect();
+    metrics.sequence_gap();
+    metrics.abandoned();
+    Ok(())
+}
+
+fn synthetic_derivative_events(venue: AdapterId, base: &str, ts: i64) -> Vec<DerivativeEvent> {
+    let meta = test_meta(venue, base, "USDT", ts);
+    let mut events = vec![
         DerivativeEvent::MarkIndex(MarkIndexSnapshot {
             meta: meta.clone(),
             mark_price: 100_000_000_000_000_000_000,
@@ -1657,22 +1790,17 @@ async fn prepare_synthetic(
             unit: OpenInterestUnit::BaseAsset,
             quote_notional: Some(1_000_000_000_000_000_000_000),
         }),
-        DerivativeEvent::TraderRatio(TraderRatioSnapshot {
+    ];
+    if venue == AdapterId::BybitLinear {
+        events.push(DerivativeEvent::TraderRatio(TraderRatioSnapshot {
             meta: fresh(meta),
             metric_kind: TraderMetricKind::BybitLongShortRatio,
             long_ratio: 600_000_000_000_000_000,
             short_ratio: 400_000_000_000_000_000,
             long_short_ratio: 1_500_000_000_000_000_000,
-        }),
-    ];
-    for event in events {
-        derivative_tx.send(event).await?;
+        }));
     }
-    market_tx.send(test_quote_book(ts)).await?;
-    metrics.reconnect();
-    metrics.sequence_gap();
-    metrics.abandoned();
-    Ok(())
+    events
 }
 
 async fn wait_for_cancel(shutdown: CancellationToken) -> Result<()> {
@@ -1680,9 +1808,9 @@ async fn wait_for_cancel(shutdown: CancellationToken) -> Result<()> {
     Ok(())
 }
 
-fn test_instrument(venue: AdapterId, ts: i64) -> InstrumentSpec {
+fn test_instrument_for(venue: AdapterId, base: &str, ts: i64) -> InstrumentSpec {
     InstrumentSpec {
-        meta: test_meta(venue, "BTC", "USDT", ts),
+        meta: test_meta(venue, base, "USDT", ts),
         contract_kind: ContractKind::Perpetual,
         settlement_asset: "USDT".into(),
         contract_multiplier: 1_000_000_000_000_000_000,
@@ -1721,12 +1849,12 @@ fn fresh(mut meta: DerivativeMeta) -> DerivativeMeta {
     meta
 }
 
-fn test_quote_book(ts: i64) -> NormalizedEvent {
+fn test_quote_book(venue: AdapterId, ts: i64) -> NormalizedEvent {
     NormalizedEvent::Book(BookSnapshot {
         meta: EventMeta {
             schema_version: 1,
             event_id: Uuid::now_v7(),
-            adapter: AdapterId::UpbitSpot,
+            adapter: venue,
             symbol: CanonicalSymbol::new("USDT", "KRW"),
             source_symbol: "KRW-USDT".into(),
             source_stream: "orderbook".into(),
@@ -1758,6 +1886,7 @@ struct Metrics {
 #[derive(Default, Clone)]
 struct MetricState {
     per_family: BTreeMap<String, FamilyCount>,
+    event_identities: HashSet<String>,
     reconnects: u64,
     sequence_gaps: u64,
     parser_rejects: u64,
@@ -1806,11 +1935,13 @@ impl Metrics {
             .collect();
         snapshot
     }
-    fn family(&self, family: &'static str) {
+    fn event(&self, event: &DerivativeEvent) {
         self.mutate(|s| {
+            let family = event_family(event);
             let v = s.per_family.entry(family.into()).or_default();
             v.events += 1;
             v.rows += 1;
+            s.event_identities.insert(event_identity(event));
         });
     }
     fn reconnect(&self) {
@@ -1934,6 +2065,57 @@ fn event_family(event: &DerivativeEvent) -> &'static str {
         DerivativeEvent::TraderRatio(_) => DerivativeEventFamily::TraderRatio.as_str(),
         DerivativeEvent::QuoteConversion(_) => DerivativeEventFamily::QuoteConversion.as_str(),
     }
+}
+
+fn event_identity(event: &DerivativeEvent) -> String {
+    let meta = event.meta();
+    let mut identity = format!(
+        "{}:{:?}:{}",
+        event_family(event),
+        meta.venue,
+        symbol_name(&meta.symbol)
+    );
+    if let DerivativeEvent::QuoteConversion(conversion) = event {
+        identity.push_str(match conversion.side {
+            QuoteSide::Bid => ":bid",
+            QuoteSide::Ask => ":ask",
+        });
+    }
+    identity
+}
+
+fn expected_run_evidence(config: &FundingConfig, basis: &ReportBasis) -> Vec<String> {
+    let mut expected = Vec::new();
+    for symbol in &basis.mainnet {
+        for venue in [AdapterId::BinanceUsdm, AdapterId::BybitLinear] {
+            for family in [
+                "instrument",
+                "mark_index",
+                "funding_estimate",
+                "funding_settlement",
+                "open_interest",
+            ] {
+                expected.push(format!("{family}:{venue:?}:{symbol}"));
+            }
+        }
+        expected.push(format!(
+            "trader_ratio:{:?}:{symbol}",
+            AdapterId::BybitLinear
+        ));
+    }
+    for conversion in &config.quote_conversions {
+        let symbol = format!("{}/{}", conversion.base, conversion.quote);
+        for venue in &conversion.venues {
+            let adapter = match venue.as_str() {
+                "upbit_spot" => AdapterId::UpbitSpot,
+                "bithumb_spot" => AdapterId::BithumbSpot,
+                _ => continue,
+            };
+            expected.push(format!("quote_conversion:{adapter:?}:{symbol}:bid"));
+            expected.push(format!("quote_conversion:{adapter:?}:{symbol}:ask"));
+        }
+    }
+    expected
 }
 
 fn excluded(value: &IneligibleInstrument) -> ExcludedSymbol {
@@ -2135,6 +2317,7 @@ mod tests {
             shutdown: CancellationToken::new(),
             metrics,
             settlements: Arc::new(Mutex::new(HashSet::new())),
+            funding_rules: Arc::new(Mutex::new(std::collections::HashMap::new())),
         };
         let ts = now_us();
         let settlement = |timestamp| {
@@ -2325,7 +2508,7 @@ mod tests {
                 symbol: CanonicalSymbol::new("BTC", "USDT"),
                 endpoints,
                 venue: AdapterId::BybitLinear,
-                binance_rules: None,
+                funding_rules: Arc::new(Mutex::new(std::collections::HashMap::new())),
             },
             tx,
             shutdown.clone(),

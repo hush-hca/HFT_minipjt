@@ -71,7 +71,7 @@ fn snapshot_then_forward_delta_with_equal_cross_sequence_is_valid() {
 }
 
 #[test]
-fn duplicate_prices_replace_quantities_and_negative_quantities_are_rejected_atomically() {
+fn rejected_negative_quantities_require_a_snapshot_before_replacement_delta() {
     let parser = BybitLinearParser::new(CanonicalSymbol::new("BTC", "USDT"));
     parser
         .parse(
@@ -86,6 +86,16 @@ fn duplicate_prices_replace_quantities_and_negative_quantities_are_rejected_atom
     ));
 
     let replacement = r#"{"topic":"orderbook.50.BTCUSDT","type":"delta","ts":1700000000200,"data":{"s":"BTCUSDT","b":[["99","7"],["99","8"]],"a":[],"u":101,"seq":1001,"cts":1700000000199}}"#;
+    assert!(matches!(
+        parse_json(&parser, replacement.to_owned(), 1_700_000_000_201_000),
+        Err(ParseError::SnapshotRequired)
+    ));
+    parser
+        .parse(
+            &mut fixture("bybit_book_snapshot.json"),
+            1_700_000_000_001_000,
+        )
+        .unwrap();
     let events = parse_json(&parser, replacement.into(), 1_700_000_000_201_000).unwrap();
     assert_eq!(
         book(&events)
@@ -189,7 +199,7 @@ fn control_frames_are_ignored_on_success_and_failures_require_reconnect() {
 }
 
 #[test]
-fn hidden_non_positive_prices_are_rejected_without_mutating_delta_state() {
+fn hidden_non_positive_prices_invalidate_delta_state() {
     let parser = BybitLinearParser::new(CanonicalSymbol::new("BTC", "USDT"));
     parser
         .parse(
@@ -202,6 +212,16 @@ fn hidden_non_positive_prices_are_rejected_without_mutating_delta_state() {
         parse_json(&parser, invalid_delta.into(), 1_700_000_000_101_000),
         Err(ParseError::InvalidBookPrice { .. })
     ));
+    assert!(matches!(
+        parser.parse(&mut fixture("bybit_book_delta.json"), 1_700_000_000_101_000),
+        Err(ParseError::SnapshotRequired)
+    ));
+    parser
+        .parse(
+            &mut fixture("bybit_book_snapshot.json"),
+            1_700_000_000_001_000,
+        )
+        .unwrap();
     let valid = parser
         .parse(&mut fixture("bybit_book_delta.json"), 1_700_000_000_101_000)
         .unwrap();
@@ -256,6 +276,13 @@ fn malformed_crossed_and_insufficient_books_are_rejected() {
     let delta = r#"{"topic":"orderbook.50.BTCUSDT","type":"delta","ts":1700000000100,"data":{"s":"BTCUSDT","b":[],"a":[],"u":101,"seq":1001,"cts":1700000000099}}"#;
     assert!(matches!(
         parse_json(&seeded, delta.into(), 1_700_000_000_101_000),
+        Err(ParseError::SnapshotRequired)
+    ));
+    // Any rejected book frame invalidates the reconstruction; a later delta
+    // must not be accepted until a new snapshot arrives.
+    let valid_delta = r#"{"topic":"orderbook.50.BTCUSDT","type":"delta","ts":1700000000101,"data":{"s":"BTCUSDT","b":[],"a":[],"u":102,"seq":1002,"cts":1700000000100}}"#;
+    assert!(matches!(
+        parse_json(&seeded, valid_delta.into(), 1_700_000_000_102_000),
         Err(ParseError::SnapshotRequired)
     ));
 }

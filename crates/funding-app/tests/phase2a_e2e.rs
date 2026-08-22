@@ -161,6 +161,7 @@ async fn literal_loopback_venues_exercise_the_network_orchestrator_publicly() {
         venue.testnet.public_websocket_url = ws.clone();
     }
     config.validate().unwrap();
+    let report_path = config.output_root.join("phase2a-report.json");
 
     let shutdown = CancellationToken::new();
     let trigger = shutdown.clone();
@@ -173,7 +174,10 @@ async fn literal_loopback_venues_exercise_the_network_orchestrator_publicly() {
         .with_public_quote_websockets(upbit_ws, bithumb_ws)
         .run(shutdown)
         .await
-        .unwrap();
+        .unwrap_or_else(|error| {
+            let persisted = std::fs::read_to_string(report_path).unwrap_or_default();
+            panic!("collector failed: {error:#}; report={persisted}")
+        });
 
     assert_eq!(report.common_mainnet_symbols, ["BTC/USDT"]);
     assert_eq!(report.common_testnet_symbols, ["BTC/USDT"]);
@@ -591,7 +595,7 @@ async fn spawn_domestic_ws(upbit: bool, requests: Arc<Mutex<Vec<String>>>) -> St
                         .replace("KRW-BTC", "KRW-USDT")
                 } else {
                     include_str!("../../md-exchanges/tests/fixtures/bithumb_book.json")
-                        .replace("BTC_KRW", "USDT_KRW")
+                        .replace("KRW-BTC", "KRW-USDT")
                 };
                 let _ = ws.send(Message::Text(fresh(&fixture, false).into())).await;
                 while let Some(message) = ws.next().await {
@@ -623,10 +627,20 @@ fn fresh_value(value: &mut serde_json::Value, now_ms: i64, next_funding: bool) {
                     name.as_str(),
                     "E" | "ts" | "time" | "timestamp" | "fundingTime" | "fundingRateTimestamp"
                 ) {
-                    let replacement = if value.is_string() {
-                        serde_json::Value::String(now_ms.to_string())
+                    let timestamp = if name == "timestamp"
+                        && value
+                            .as_i64()
+                            .or_else(|| value.as_str().and_then(|raw| raw.parse().ok()))
+                            .is_some_and(|original| original > 100_000_000_000_000)
+                    {
+                        now_ms.saturating_mul(1_000)
                     } else {
-                        serde_json::Value::from(now_ms)
+                        now_ms
+                    };
+                    let replacement = if value.is_string() {
+                        serde_json::Value::String(timestamp.to_string())
+                    } else {
+                        serde_json::Value::from(timestamp)
                     };
                     *value = replacement;
                 } else if next_funding && matches!(name.as_str(), "T" | "nextFundingTime") {

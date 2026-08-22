@@ -542,9 +542,12 @@ fn apply_binance_funding_info(
                 spec.funding_rate_cap = Some(cap);
                 spec.funding_rate_bounds_provenance = FundingRateBoundsProvenance::VenueFundingInfo;
             }
-            (Some(_), Err(detail), _) | (Some(_), _, Err(detail)) => {
-                instruments.specs.remove(&symbol);
-                instruments.invalid.insert(symbol, detail);
+            // `fundingInfo` is an override-only endpoint.  A malformed
+            // override must not discard an otherwise valid perpetual; retain
+            // the 8-hour, unbounded exchangeInfo default and let the next
+            // refresh replace it with a valid override.
+            (Some(_), Err(_), _) | (Some(_), _, Err(_)) => {
+                // Deliberately retain the existing default rule.
             }
             (None, _, _) => {}
         }

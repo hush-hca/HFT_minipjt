@@ -1,5 +1,5 @@
 use funding_core::{
-    instrument::{FundingRateBoundsProvenance, InstrumentSpec},
+    instrument::InstrumentSpec,
     meta::DerivativeMeta,
     public::{
         DerivativeEvent, FundingBasis, FundingEstimate, FundingIntervalProvenance, FundingRateKind,
@@ -39,20 +39,21 @@ impl Default for FundingRules {
 
 impl FundingRules {
     pub fn from_instrument(spec: &InstrumentSpec) -> Result<Self, DerivativeParseError> {
-        if spec.funding_rate_bounds_provenance == FundingRateBoundsProvenance::Unknown {
-            return Err(DerivativeParseError::MissingRateBounds);
-        }
-        let (Some(rate_floor), Some(rate_cap)) = (spec.funding_rate_floor, spec.funding_rate_cap)
-        else {
-            return Err(DerivativeParseError::MissingRateBounds);
-        };
+        // `/fapi/v1/fundingInfo` is an override feed: Binance omits ordinary
+        // symbols entirely.  Missing bounds therefore means "venue default",
+        // not an invalid instrument.  Keep rate validation unbounded until an
+        // explicit override is discovered.
         let rules = Self {
-            interval_secs: spec.funding_interval_secs,
+            interval_secs: if spec.funding_interval_secs == 0 {
+                DEFAULT_FUNDING_INTERVAL_SECS
+            } else {
+                spec.funding_interval_secs
+            },
             interval_provenance: spec.funding_interval_provenance,
-            rate_floor: Some(rate_floor),
-            rate_cap: Some(rate_cap),
+            rate_floor: spec.funding_rate_floor,
+            rate_cap: spec.funding_rate_cap,
         };
-        validate_rules(rules, true)?;
+        validate_rules(rules, false)?;
         Ok(rules)
     }
 }
@@ -90,7 +91,7 @@ impl FundingSchedule {
             if rule.effective_from_ts_us < 0 {
                 return Err(DerivativeParseError::InvalidFundingSchedule);
             }
-            validate_rules(rule.rules, true)?;
+            validate_rules(rule.rules, false)?;
             if index > 0 && rules[index - 1].effective_from_ts_us == rule.effective_from_ts_us {
                 return Err(DerivativeParseError::InvalidFundingSchedule);
             }
