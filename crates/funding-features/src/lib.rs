@@ -5,5 +5,6 @@
 
 pub use funding_core::{calendar, feature, opportunity};
 
+pub mod basis;
 pub mod book;
 pub mod flow;

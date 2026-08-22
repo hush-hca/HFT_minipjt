@@ -104,6 +104,20 @@ pub enum FeatureInvalidReason {
         available_base: ExactDecimal,
     },
     MissingInstrumentRule,
+    VenueSourceMismatch {
+        declared_venue: AdapterId,
+        source_venue: AdapterId,
+    },
+    VenueInstrumentKindMismatch {
+        venue: AdapterId,
+        instrument_kind: InstrumentKind,
+    },
+    SymbolMismatch {
+        expected: CanonicalSymbol,
+        actual: CanonicalSymbol,
+    },
+    PriceKindInstrumentMismatch,
+    InvalidBasisPair,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
@@ -420,22 +434,159 @@ pub enum PriceKind {
     PerpetualMid,
     Mark,
     Index,
+    SpotSellIntoBids,
+    SpotBuyFromAsks,
+    PerpetualSellIntoBids,
+    PerpetualBuyFromAsks,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InstrumentKind {
+    Spot,
+    Perpetual,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct NamedPrice {
     pub venue: AdapterId,
+    pub instrument_kind: InstrumentKind,
     pub kind: PriceKind,
     pub value: ExactDecimal,
     pub source: FeatureSource,
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BasisKind {
+    IndicativePair {
+        reference: PriceKind,
+        compared: PriceKind,
+    },
+    ExecutableEntry,
+    ExecutableExit,
+}
+
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct BasisFeature {
     pub symbol: CanonicalSymbol,
+    pub kind: BasisKind,
     pub reference: NamedPrice,
     pub compared: NamedPrice,
+    pub signed_price_difference: ExactDecimal,
     pub basis_bps: ExactDecimal,
+    pub decision_ts_us: i64,
+    pub freshness_limit_us: i64,
+    pub validity: FeatureValidity,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NbboSide {
+    Bid,
+    Ask,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NbboMarketState {
+    Incomplete,
+    Normal,
+    Locked,
+    Crossed,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct NbboQuote {
+    pub venue: AdapterId,
+    pub instrument_kind: InstrumentKind,
+    pub symbol: CanonicalSymbol,
+    pub side: NbboSide,
+    pub price: ExactDecimal,
+    pub requested_base: ExactDecimal,
+    pub available_base: ExactDecimal,
+    pub quote_notional: Option<ExactDecimal>,
+    pub levels_consumed: u16,
+    pub age_us: i64,
+    pub source: FeatureSource,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NbboVenueExclusionReason {
+    VenueSourceMismatch {
+        declared_venue: AdapterId,
+        source_venue: AdapterId,
+    },
+    SourceSymbolMismatch {
+        declared_symbol: CanonicalSymbol,
+        source_symbol: CanonicalSymbol,
+    },
+    SymbolMismatch {
+        expected: CanonicalSymbol,
+        actual: CanonicalSymbol,
+    },
+    InstrumentKindMismatch {
+        expected: InstrumentKind,
+        actual: InstrumentKind,
+    },
+    VenueInstrumentKindMismatch {
+        venue: AdapterId,
+        instrument_kind: InstrumentKind,
+    },
+    DuplicateMarketInput,
+    StructuralBookInvalid(BookInvalidReason),
+    FeatureInvalid(FeatureInvalidReason),
+    FutureTimestamp {
+        source_ts_us: i64,
+        decision_ts_us: i64,
+    },
+    Stale {
+        age_us: i64,
+        limit_us: i64,
+    },
+    QuoteSideMismatch {
+        expected: ExecutableQuoteSide,
+        actual: ExecutableQuoteSide,
+    },
+    RequestedQuantityMismatch {
+        expected: ExactDecimal,
+        actual: ExactDecimal,
+    },
+    QuoteInvalid(QuoteInvalidReason),
+    MissingAveragePrice,
+    NonPositivePrice,
+    ExecutableBookLockedOrCrossed {
+        sell_price: ExactDecimal,
+        buy_price: ExactDecimal,
+    },
+    InsufficientDepth {
+        requested_base: ExactDecimal,
+        available_base: ExactDecimal,
+    },
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct NbboVenueExclusion {
+    pub venue: AdapterId,
+    pub instrument_kind: InstrumentKind,
+    pub symbol: CanonicalSymbol,
+    pub side: NbboSide,
+    pub source: FeatureSource,
+    pub reason: NbboVenueExclusionReason,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct NbboFeature {
+    pub symbol: CanonicalSymbol,
+    pub instrument_kind: InstrumentKind,
+    pub requested_base: ExactDecimal,
+    pub decision_ts_us: i64,
+    pub freshness_limit_us: i64,
+    pub bid: Option<NbboQuote>,
+    pub ask: Option<NbboQuote>,
+    pub market_state: NbboMarketState,
+    pub exclusions: Vec<NbboVenueExclusion>,
     pub validity: FeatureValidity,
 }
 
@@ -453,5 +604,6 @@ pub enum FeatureEvent {
         decision_ts_us: i64,
         value: Box<FlowFeatures>,
     },
+    Nbbo(Box<NbboFeature>),
     Basis(Box<BasisFeature>),
 }
