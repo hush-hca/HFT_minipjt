@@ -105,6 +105,84 @@ async fn recovers_an_unfinished_partial_and_merges_all_complete_rows() {
 }
 
 #[tokio::test]
+async fn reopen_does_not_replay_derivative_partial_proven_consumed() {
+    let root = tempdir().unwrap();
+    let first = mark(None, HOUR_US + 1);
+    let key = DerivativePartitionKey::for_event(&first).unwrap();
+    let partial = key.partial_path(root.path());
+    let config = StorageConfig {
+        output_root: root.path().into(),
+        batch_rows: 1,
+        flush_interval: Duration::from_secs(60),
+    };
+    for event in [first, mark(None, HOUR_US + 2)] {
+        let mut router = DerivativePartitionRouter::open(config.clone()).unwrap();
+        router.push(event).await.unwrap();
+        router.shutdown().await.unwrap();
+    }
+
+    let final_path = partial.with_file_name("mark_index.arrow");
+    fs::write(&partial, b"already consumed before interruption").unwrap();
+    let witness = final_path.with_file_name("mark_index.arrow.merge-witness.interrupted.candidate");
+    let source = final_path.with_file_name("mark_index.arrow.merge-witness.interrupted.source");
+    fs::copy(&final_path, &witness).unwrap();
+    fs::copy(&partial, &source).unwrap();
+
+    let mut resumed = DerivativePartitionRouter::open(config).unwrap();
+    resumed.push(mark(None, HOUR_US + 3)).await.unwrap();
+    resumed.shutdown().await.unwrap();
+
+    let rows = StreamReader::try_new(BufReader::new(fs::File::open(&final_path).unwrap()), None)
+        .unwrap()
+        .map(|batch| batch.unwrap().num_rows())
+        .sum::<usize>();
+    assert_eq!(rows, 3);
+    assert!(!partial.exists());
+    assert!(!witness.exists());
+    assert!(!source.exists());
+}
+
+#[tokio::test]
+async fn stale_derivative_witness_never_consumes_a_new_partial() {
+    let root = tempdir().unwrap();
+    let first = mark(None, HOUR_US + 1);
+    let key = DerivativePartitionKey::for_event(&first).unwrap();
+    let partial = key.partial_path(root.path());
+    let config = StorageConfig {
+        output_root: root.path().into(),
+        batch_rows: 1,
+        flush_interval: Duration::from_secs(60),
+    };
+    for event in [first, mark(None, HOUR_US + 2)] {
+        let mut router = DerivativePartitionRouter::open(config.clone()).unwrap();
+        router.push(event).await.unwrap();
+        router.shutdown().await.unwrap();
+    }
+    let final_path = partial.with_file_name("mark_index.arrow");
+
+    let mut interrupted = DerivativePartitionRouter::open(config.clone()).unwrap();
+    interrupted.push(mark(None, HOUR_US + 3)).await.unwrap();
+    drop(interrupted);
+
+    let witness = final_path.with_file_name("mark_index.arrow.merge-witness.stale.candidate");
+    let source = final_path.with_file_name("mark_index.arrow.merge-witness.stale.source");
+    fs::copy(&final_path, &witness).unwrap();
+    fs::write(&source, b"different previously consumed partial").unwrap();
+
+    let mut resumed = DerivativePartitionRouter::open(config).unwrap();
+    resumed.push(mark(None, HOUR_US + 4)).await.unwrap();
+    resumed.shutdown().await.unwrap();
+
+    let rows = StreamReader::try_new(BufReader::new(fs::File::open(&final_path).unwrap()), None)
+        .unwrap()
+        .map(|batch| batch.unwrap().num_rows())
+        .sum::<usize>();
+    assert_eq!(rows, 4);
+    assert!(!witness.exists());
+    assert!(!source.exists());
+}
+
+#[tokio::test]
 async fn writer_creation_errors_are_propagated_without_replacing_the_root_file() {
     let root = tempdir().unwrap();
     let root_file = root.path().join("root-is-file");

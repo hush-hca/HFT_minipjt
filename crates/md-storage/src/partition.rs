@@ -12,6 +12,10 @@ use arrow_schema::SchemaRef;
 use chrono::{DateTime, Datelike, Timelike, Utc};
 use md_core::model::{AdapterId, CanonicalSymbol, NormalizedEvent};
 
+use crate::recovery::{
+    complete_merge_witness, create_merge_witness, publish_arrow, recover_orphaned_publication,
+    resolve_merge_witness,
+};
 use crate::{BookBatchBuilder, SchemaContext, StorageError, TradeBatchBuilder, recover_partial};
 
 static FILE_ID: AtomicU64 = AtomicU64::new(0);
@@ -318,6 +322,12 @@ fn open_stream(
 }
 
 fn prepare_partial(partial_path: &Path) -> Result<(), StorageError> {
+    let final_path = final_path(partial_path)?;
+    recover_orphaned_publication(&final_path)?;
+    recover_orphaned_publication(partial_path)?;
+    if resolve_merge_witness(&final_path, partial_path)? {
+        return Ok(());
+    }
     if partial_path.exists() {
         recover_partial(partial_path)?;
         finalize_partial(partial_path)?;
@@ -328,7 +338,7 @@ fn prepare_partial(partial_path: &Path) -> Result<(), StorageError> {
 fn finalize_partial(partial_path: &Path) -> Result<(), StorageError> {
     let final_path = final_path(partial_path)?;
     if !final_path.exists() {
-        fs::rename(partial_path, final_path)?;
+        publish_arrow(partial_path, &final_path)?;
         return Ok(());
     }
 
@@ -345,11 +355,18 @@ fn finalize_partial(partial_path: &Path) -> Result<(), StorageError> {
 
     let replacement = unique_sibling(&final_path, "merge");
     write_stream(&replacement, &final_schema, &batches)?;
-    if let Err(error) = replace_file(&replacement, &final_path) {
+    let witness = match create_merge_witness(&replacement, &final_path, partial_path) {
+        Ok(witness) => witness,
+        Err(error) => {
+            let _ = fs::remove_file(&replacement);
+            return Err(error.into());
+        }
+    };
+    if let Err(error) = publish_arrow(&replacement, &final_path) {
         let _ = fs::remove_file(&replacement);
         return Err(error.into());
     }
-    fs::remove_file(partial_path)?;
+    complete_merge_witness(&witness, partial_path)?;
     Ok(())
 }
 
@@ -374,16 +391,6 @@ fn write_stream(
     writer.finish()?;
     writer.get_mut().flush()?;
     Ok(())
-}
-
-fn replace_file(replacement: &Path, target: &Path) -> std::io::Result<()> {
-    let backup = unique_sibling(target, "merge-backup");
-    fs::rename(target, &backup)?;
-    if let Err(error) = fs::rename(replacement, target) {
-        let _ = fs::rename(&backup, target);
-        return Err(error);
-    }
-    fs::remove_file(backup)
 }
 
 fn final_path(partial_path: &Path) -> Result<PathBuf, StorageError> {

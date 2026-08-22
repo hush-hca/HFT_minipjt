@@ -176,14 +176,20 @@ fn configured_funding_bounds_are_enforced_without_rounding() {
         rate_floor: None,
         rate_cap: None,
     };
-    assert!(matches!(
-        binance::parse_mark_funding_with_rules(
-            &mut fixture("binance_mark_funding.json"),
-            1_720_000_000_124_000,
-            unbounded,
-        ),
-        Err(binance::DerivativeParseError::MissingRateBounds)
-    ));
+    let ordinary = binance::parse_mark_funding_with_rules(
+        &mut fixture("binance_mark_funding.json"),
+        1_720_000_000_124_000,
+        unbounded,
+    )
+    .unwrap();
+    let DerivativeEvent::FundingEstimate(ordinary) = &ordinary[1] else {
+        panic!()
+    };
+    assert_eq!(ordinary.interval_secs, 14_400);
+    assert_eq!(
+        ordinary.interval_provenance,
+        FundingIntervalProvenance::InstrumentRule
+    );
 
     let rules = binance::FundingRules {
         interval_secs: 14_400,
@@ -201,6 +207,35 @@ fn configured_funding_bounds_are_enforced_without_rounding() {
             rate: 100_000_000_000_001,
             cap: 100_000_000_000_000,
         })
+    ));
+}
+
+#[test]
+fn rejected_bybit_ticker_delta_invalidates_state_until_a_new_snapshot() {
+    let mut parser =
+        bybit::BybitTickerParser::new(md_core::model::CanonicalSymbol::new("BTC", "USDT"));
+    parser
+        .parse(
+            &mut fixture("bybit_ticker_funding.json"),
+            1_720_000_000_124_000,
+        )
+        .unwrap();
+
+    let mut invalid_delta = String::from_utf8(fixture("bybit_ticker_delta.json"))
+        .unwrap()
+        .replace("60001.123456789012345678", "0")
+        .into_bytes();
+    assert!(
+        parser
+            .parse(&mut invalid_delta, 1_720_000_000_224_000)
+            .is_err()
+    );
+    assert!(matches!(
+        parser.parse(
+            &mut fixture("bybit_ticker_delta.json"),
+            1_720_000_000_324_000,
+        ),
+        Err(bybit::DerivativeParseError::SnapshotRequired)
     ));
 }
 
@@ -256,6 +291,12 @@ fn bybit_ticker_requires_snapshot_and_rejects_sequence_regressions_atomically() 
         ),
         Err(bybit::DerivativeParseError::SequenceRegression { .. })
     ));
+    parser
+        .parse(
+            &mut fixture("bybit_ticker_funding.json"),
+            1_720_000_000_124_000,
+        )
+        .unwrap();
     let mut time_regression = String::from_utf8(fixture("bybit_ticker_delta_regression.json"))
         .unwrap()
         .replace("\"cs\": 99", "\"cs\": 102")
@@ -264,6 +305,12 @@ fn bybit_ticker_requires_snapshot_and_rejects_sequence_regressions_atomically() 
         parser.parse(&mut time_regression, 1_720_000_000_224_000),
         Err(bybit::DerivativeParseError::TimestampRegression { .. })
     ));
+    parser
+        .parse(
+            &mut fixture("bybit_ticker_funding.json"),
+            1_720_000_000_124_000,
+        )
+        .unwrap();
     let mut wrong_symbol = String::from_utf8(fixture("bybit_ticker_delta.json"))
         .unwrap()
         .replace("BTCUSDT", "ETHUSDT")
@@ -272,16 +319,13 @@ fn bybit_ticker_requires_snapshot_and_rejects_sequence_regressions_atomically() 
         parser.parse(&mut wrong_symbol, 1_720_000_000_224_000),
         Err(bybit::DerivativeParseError::SymbolMismatch { .. })
     ));
-    let after = parser
-        .parse(
+    assert!(matches!(
+        parser.parse(
             &mut fixture("bybit_ticker_delta.json"),
             1_720_000_000_224_000,
-        )
-        .unwrap();
-    let DerivativeEvent::FundingEstimate(funding) = &after[1] else {
-        panic!()
-    };
-    assert_eq!(funding.rate, 110_000_000_000_001);
+        ),
+        Err(bybit::DerivativeParseError::SnapshotRequired)
+    ));
 }
 
 #[test]

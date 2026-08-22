@@ -33,9 +33,17 @@ pub struct SchedulerSummary {
     pub pending_response_completions: usize,
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Phase2aStatus {
+    Passed,
+    Failed,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Phase2aReport {
     pub schema_version: u16,
+    pub status: Phase2aStatus,
     pub public_data_only: bool,
     pub requested_symbols: Vec<String>,
     pub common_mainnet_symbols: Vec<String>,
@@ -51,6 +59,8 @@ pub struct Phase2aReport {
     pub scheduler: SchedulerSummary,
     pub public_only_requests: PublicOnlyRequestSummary,
     pub health_errors: Vec<String>,
+    pub missing_event_families: Vec<String>,
+    pub missing_evidence: Vec<String>,
     pub finalized_paths: Vec<PathBuf>,
     pub output_root: PathBuf,
     pub report_path: PathBuf,

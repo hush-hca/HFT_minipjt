@@ -80,6 +80,21 @@ impl BybitTickerParser {
         payload: &mut [u8],
         recv_us: i64,
     ) -> Result<Vec<DerivativeEvent>, DerivativeParseError> {
+        let result = self.parse_inner(payload, recv_us);
+        if result.is_err() {
+            // Ticker deltas are sparse. Once a frame is rejected, a later
+            // delta cannot safely reconstruct fields that may have changed in
+            // the rejected frame, so require a new authoritative snapshot.
+            self.reset();
+        }
+        result
+    }
+
+    fn parse_inner(
+        &mut self,
+        payload: &mut [u8],
+        recv_us: i64,
+    ) -> Result<Vec<DerivativeEvent>, DerivativeParseError> {
         validate_recv(recv_us)?;
         let response: BybitTickerResponse = decode(payload, AdapterId::BybitLinear)?;
         let expected = format!("{}{}", self.symbol.base, self.symbol.quote);

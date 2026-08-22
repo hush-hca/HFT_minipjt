@@ -52,7 +52,8 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::report::{
-    ExcludedSymbol, FamilyCount, Phase2aReport, PublicOnlyRequestSummary, SchedulerSummary,
+    ExcludedSymbol, FamilyCount, Phase2aReport, Phase2aStatus, PublicOnlyRequestSummary,
+    SchedulerSummary,
 };
 
 const BINANCE_LIMIT_PER_MINUTE: u32 = 2_400;
@@ -251,12 +252,19 @@ impl Phase2Collector {
             derivative_result?;
             let report_path = self.config.output_root.join("phase2a-report.json");
             let snapshot = metrics.snapshot();
+            let missing_event_families = missing_event_families(&snapshot);
+            let missing_evidence = missing_run_evidence(&self.config, &basis, &snapshot);
             let failure_report = build_report(
                 &self.config,
                 basis,
                 snapshot,
                 finalized_arrow_paths(&self.config.output_root)?,
                 report_path.clone(),
+                CompletionAudit {
+                    status: Phase2aStatus::Failed,
+                    missing_event_families,
+                    missing_evidence,
+                },
             );
             atomic_json(&report_path, &failure_report)?;
             return Err(error);
@@ -321,23 +329,7 @@ impl Phase2Collector {
         // producer metrics, never by scanning a pre-existing output tree.
         // This prevents an earlier Arrow hour from masking a failed startup.
         let completion_snapshot = metrics.snapshot();
-        let missing_families: Vec<_> = [
-            "instrument",
-            "mark_index",
-            "funding_estimate",
-            "funding_settlement",
-            "open_interest",
-            "trader_ratio",
-            "quote_conversion",
-        ]
-        .into_iter()
-        .filter(|family| {
-            completion_snapshot
-                .per_family
-                .get(*family)
-                .is_none_or(|count| count.events == 0)
-        })
-        .collect();
+        let missing_families = missing_event_families(&completion_snapshot);
         if !missing_families.is_empty() {
             let error = anyhow!(
                 "run completion gate failed; missing event families: {}",
@@ -346,10 +338,7 @@ impl Phase2Collector {
             metrics.error(error.to_string());
             terminal_error.get_or_insert(error);
         }
-        let missing_evidence = expected_run_evidence(&self.config, &basis)
-            .into_iter()
-            .filter(|identity| !completion_snapshot.event_identities.contains(identity))
-            .collect::<Vec<_>>();
+        let missing_evidence = missing_run_evidence(&self.config, &basis, &completion_snapshot);
         if !missing_evidence.is_empty() {
             let error = anyhow!(
                 "run completion gate failed; missing venue/symbol evidence: {}",
@@ -383,6 +372,15 @@ impl Phase2Collector {
             snapshot,
             finalized_paths,
             report_path.clone(),
+            CompletionAudit {
+                status: if terminal_error.is_some() {
+                    Phase2aStatus::Failed
+                } else {
+                    Phase2aStatus::Passed
+                },
+                missing_event_families: missing_families,
+                missing_evidence,
+            },
         );
         atomic_json(&report_path, &report)?;
         if let Some(error) = terminal_error {
@@ -393,15 +391,23 @@ impl Phase2Collector {
     }
 }
 
+struct CompletionAudit {
+    status: Phase2aStatus,
+    missing_event_families: Vec<String>,
+    missing_evidence: Vec<String>,
+}
+
 fn build_report(
     config: &FundingConfig,
     basis: ReportBasis,
     snapshot: MetricState,
     finalized_paths: Vec<PathBuf>,
     report_path: PathBuf,
+    completion: CompletionAudit,
 ) -> Phase2aReport {
     Phase2aReport {
         schema_version: 1,
+        status: completion.status,
         public_data_only: true,
         requested_symbols: basis.requested,
         common_mainnet_symbols: basis.mainnet,
@@ -431,10 +437,44 @@ fn build_report(
                 && snapshot.authenticated_requests == 0,
         },
         health_errors: snapshot.errors,
+        missing_event_families: completion.missing_event_families,
+        missing_evidence: completion.missing_evidence,
         finalized_paths,
         output_root: config.output_root.clone(),
         report_path,
     }
+}
+
+fn missing_event_families(snapshot: &MetricState) -> Vec<String> {
+    [
+        "instrument",
+        "mark_index",
+        "funding_estimate",
+        "funding_settlement",
+        "open_interest",
+        "trader_ratio",
+        "quote_conversion",
+    ]
+    .into_iter()
+    .filter(|family| {
+        snapshot
+            .per_family
+            .get(*family)
+            .is_none_or(|count| count.events == 0)
+    })
+    .map(str::to_owned)
+    .collect()
+}
+
+fn missing_run_evidence(
+    config: &FundingConfig,
+    basis: &ReportBasis,
+    snapshot: &MetricState,
+) -> Vec<String> {
+    expected_run_evidence(config, basis)
+        .into_iter()
+        .filter(|identity| !snapshot.event_identities.contains(identity))
+        .collect()
 }
 
 #[derive(Default)]
@@ -920,6 +960,56 @@ struct DerivativeWsSpec {
     funding_rules: FundingRuleStore,
 }
 
+#[derive(Debug, Eq, PartialEq)]
+enum DerivativeControlFrame {
+    Accepted,
+    Rejected(String),
+    Data,
+}
+
+fn classify_derivative_control(text: &str, venue: AdapterId) -> DerivativeControlFrame {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+        return DerivativeControlFrame::Data;
+    };
+    match venue {
+        AdapterId::BinanceUsdm if value.get("id").is_some() => {
+            if let Some(code) = value.get("code").and_then(serde_json::Value::as_i64) {
+                let message = value
+                    .get("msg")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("unspecified subscription failure");
+                DerivativeControlFrame::Rejected(format!("code={code}: {message}"))
+            } else if value.get("result").is_some() {
+                DerivativeControlFrame::Accepted
+            } else {
+                DerivativeControlFrame::Data
+            }
+        }
+        AdapterId::BybitLinear if value.get("op").is_some() || value.get("success").is_some() => {
+            match value.get("success").and_then(serde_json::Value::as_bool) {
+                Some(false) => DerivativeControlFrame::Rejected(
+                    value
+                        .get("ret_msg")
+                        .or_else(|| value.get("retMsg"))
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("unspecified subscription failure")
+                        .to_owned(),
+                ),
+                Some(true) => DerivativeControlFrame::Accepted,
+                None if matches!(
+                    value.get("op").and_then(serde_json::Value::as_str),
+                    Some("ping" | "pong")
+                ) =>
+                {
+                    DerivativeControlFrame::Accepted
+                }
+                None => DerivativeControlFrame::Data,
+            }
+        }
+        _ => DerivativeControlFrame::Data,
+    }
+}
+
 fn spawn_derivative_ws(
     spec: DerivativeWsSpec,
     tx: mpsc::Sender<DerivativeEvent>,
@@ -997,6 +1087,16 @@ fn spawn_derivative_ws(
                         Ok(frame) => match frame {
                         Some(Ok(Message::Text(text))) => {
                             let recv = now_us();
+                            match classify_derivative_control(&text, venue) {
+                                DerivativeControlFrame::Accepted => continue,
+                                DerivativeControlFrame::Rejected(detail) => {
+                                    metrics.parser_reject();
+                                    tracing::debug!(?venue, %detail, "derivative websocket control frame rejected");
+                                    reconnect = true;
+                                    continue;
+                                }
+                                DerivativeControlFrame::Data => {}
+                            }
                             let mut bytes = text.as_bytes().to_vec();
                             let parsed = match venue {
                                 AdapterId::BinanceUsdm => binance::parse_mark_funding_with_rules(
@@ -1019,14 +1119,16 @@ fn spawn_derivative_ws(
                                     healthy_events = healthy_events.saturating_add(1);
                                 },
                                 Err(error) => {
-                                    // Subscription acknowledgements are control frames, not rejects.
-                                    if !text.contains("\"success\"") && !text.contains("\"ret_msg\"") && !text.contains("\"result\":null") {
-                                        metrics.parser_reject();
-                                        tracing::debug!(?venue, %error, "derivative websocket frame rejected");
-                                        if venue == AdapterId::BybitLinear && is_derivative_sequence_gap(&error) {
+                                    metrics.parser_reject();
+                                    tracing::debug!(?venue, %error, "derivative websocket frame rejected");
+                                    if venue == AdapterId::BybitLinear {
+                                        if is_derivative_sequence_gap(&error) {
                                             metrics.sequence_gap();
-                                            reconnect = true;
                                         }
+                                        // Bybit ticker deltas are sparse. Any rejected
+                                        // data frame invalidates the local state and must
+                                        // be followed by a fresh snapshot on a new session.
+                                        reconnect = true;
                                     }
                                 }
                             }
@@ -1354,6 +1456,19 @@ fn is_scheduler_wait(error: &anyhow::Error) -> bool {
         || error.downcast_ref::<RateLimitedPoll>().is_some()
 }
 
+fn bybit_poll_error(
+    code: i64,
+    rate_limited: bool,
+    until: Option<Instant>,
+    venue_symbol: &str,
+) -> anyhow::Error {
+    if rate_limited {
+        RateLimitedPoll { until }.into()
+    } else {
+        anyhow!("Bybit public REST response rejected for {venue_symbol}: retCode={code}")
+    }
+}
+
 fn retry_delay(scheduler: &RestScheduler, failure_streak: u32) -> Duration {
     let now = Instant::now();
     if let Some(until) = scheduler.snapshot(now).blocked_until {
@@ -1492,7 +1607,7 @@ async fn poll_once(
             "Bybit successful REST response has no integer retCode"
         ));
     }
-    if bybit_ret_code.is_some_and(|code| code != 0) {
+    if let Some(code) = bybit_ret_code.filter(|code| *code != 0) {
         let signal = complete_response(
             scheduler,
             &permit,
@@ -1504,10 +1619,12 @@ async fn poll_once(
         if signal {
             context.metrics.rate_block();
         }
-        return Err(RateLimitedPoll {
-            until: scheduler.snapshot(Instant::now()).blocked_until,
-        }
-        .into());
+        return Err(bybit_poll_error(
+            code,
+            signal,
+            scheduler.snapshot(Instant::now()).blocked_until,
+            &venue_symbol,
+        ));
     }
     let recv = now_us();
     let parsed = match (spec.venue, spec.kind) {
@@ -2304,6 +2421,45 @@ fn publish_report(temporary: &Path, target: &Path, id: Uuid) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn derivative_control_frames_distinguish_success_failure_and_data() {
+        assert_eq!(
+            classify_derivative_control(r#"{"result":null,"id":1}"#, AdapterId::BinanceUsdm),
+            DerivativeControlFrame::Accepted
+        );
+        assert!(matches!(
+            classify_derivative_control(
+                r#"{"id":1,"code":-1121,"msg":"Invalid symbol."}"#,
+                AdapterId::BinanceUsdm
+            ),
+            DerivativeControlFrame::Rejected(detail) if detail.contains("-1121")
+        ));
+        assert!(matches!(
+            classify_derivative_control(
+                r#"{"success":false,"ret_msg":"subscription rejected","op":"subscribe"}"#,
+                AdapterId::BybitLinear
+            ),
+            DerivativeControlFrame::Rejected(detail) if detail == "subscription rejected"
+        ));
+        assert_eq!(
+            classify_derivative_control(
+                r#"{"topic":"tickers.BTCUSDT","type":"snapshot"}"#,
+                AdapterId::BybitLinear
+            ),
+            DerivativeControlFrame::Data
+        );
+    }
+
+    #[test]
+    fn only_rate_limited_bybit_errors_are_scheduler_waits() {
+        let business = bybit_poll_error(10001, false, None, "BTCUSDT");
+        assert!(!is_scheduler_wait(&business));
+        assert!(business.to_string().contains("retCode=10001"));
+
+        let limited = bybit_poll_error(10006, true, Some(Instant::now()), "BTCUSDT");
+        assert!(is_scheduler_wait(&limited));
+    }
 
     #[test]
     fn repeated_funding_settlement_is_emitted_once_but_next_timestamp_is_new() {

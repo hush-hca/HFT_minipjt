@@ -17,6 +17,10 @@ use crate::derivative_batch::{DerivativeBatchBuilder, family_of};
 use crate::derivative_schema::{
     DerivativeEventFamily, DerivativeSchemaContext, derivative_schema, derivative_venue_path,
 };
+use crate::recovery::{
+    complete_merge_witness, create_merge_witness, publish_arrow, recover_orphaned_publication,
+    resolve_merge_witness,
+};
 use crate::{StorageConfig, StorageError, recover_partial};
 
 static DERIVATIVE_FILE_ID: AtomicU64 = AtomicU64::new(0);
@@ -296,6 +300,12 @@ impl DerivativeSink for IpcDerivativeSink {
 }
 
 fn prepare_partial(path: &Path) -> Result<(), StorageError> {
+    let final_path = path.with_extension("");
+    recover_orphaned_publication(&final_path)?;
+    recover_orphaned_publication(path)?;
+    if resolve_merge_witness(&final_path, path)? {
+        return Ok(());
+    }
     if path.exists() {
         recover_partial(path)?;
         finalize_partial(path)?;
@@ -306,7 +316,7 @@ fn prepare_partial(path: &Path) -> Result<(), StorageError> {
 fn finalize_partial(partial: &Path) -> Result<(), StorageError> {
     let final_path = partial.with_extension("");
     if !final_path.exists() {
-        fs::rename(partial, final_path)?;
+        publish_arrow(partial, &final_path)?;
         return Ok(());
     }
     let mut final_reader = strict_reader(&final_path, true)?;
@@ -333,11 +343,20 @@ fn finalize_partial(partial: &Path) -> Result<(), StorageError> {
         let _ = fs::remove_file(&replacement);
         return Err(error);
     }
-    if let Err(error) = replace_file(&replacement, &final_path) {
+    drop(final_reader);
+    drop(partial_reader);
+    let witness = match create_merge_witness(&replacement, &final_path, partial) {
+        Ok(witness) => witness,
+        Err(error) => {
+            let _ = fs::remove_file(&replacement);
+            return Err(error.into());
+        }
+    };
+    if let Err(error) = publish_arrow(&replacement, &final_path) {
         let _ = fs::remove_file(&replacement);
         return Err(error.into());
     }
-    fs::remove_file(partial)?;
+    complete_merge_witness(&witness, partial)?;
     Ok(())
 }
 
@@ -408,17 +427,6 @@ fn stream_read_error(
             message,
         ))
     }
-}
-
-fn replace_file(replacement: &Path, target: &Path) -> std::io::Result<()> {
-    let backup = unique_sibling(target, "merge-backup");
-    fs::rename(target, &backup)?;
-    if let Err(error) = fs::rename(replacement, target) {
-        let _ = fs::rename(&backup, target);
-        return Err(error);
-    }
-    let _ = fs::remove_file(backup);
-    Ok(())
 }
 
 fn unique_sibling(path: &Path, label: &str) -> PathBuf {

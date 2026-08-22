@@ -206,7 +206,11 @@ pub fn parse_mark_funding_with_rules(
     recv_us: i64,
     rules: FundingRules,
 ) -> Result<Vec<DerivativeEvent>, DerivativeParseError> {
-    parse_mark_funding_inner(payload, recv_us, rules, true)
+    // Binance's fundingInfo endpoint only returns symbols whose venue-default
+    // funding parameters have been adjusted. Ordinary symbols therefore have
+    // a known interval but no explicit per-symbol bounds; validate a bound
+    // whenever one is published without requiring both to exist.
+    parse_mark_funding_inner(payload, recv_us, rules, false)
 }
 
 fn parse_mark_funding_inner(

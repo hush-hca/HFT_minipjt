@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use funding_app::{Phase2Collector, SyntheticPublicSource};
+use funding_app::{Phase2Collector, Phase2aStatus, SyntheticPublicSource};
 use funding_core::config::FundingConfig;
 use futures_util::{SinkExt, StreamExt};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -31,6 +31,9 @@ async fn loopback_public_collection_drains_and_validates_every_family() {
         .await
         .unwrap();
 
+    assert_eq!(report.status, Phase2aStatus::Passed);
+    assert!(report.missing_event_families.is_empty());
+    assert!(report.missing_evidence.is_empty());
     assert_eq!(report.common_mainnet_symbols, ["BTC/USDT", "ETH/USDT"]);
     assert_eq!(report.common_testnet_symbols, ["BTC/USDT"]);
     assert!(report.reconnects >= 1);
@@ -79,6 +82,7 @@ async fn producer_failure_drains_and_writes_a_failed_report() {
         &std::fs::read(config.output_root.join("phase2a-report.json")).unwrap(),
     )
     .unwrap();
+    assert_eq!(report["status"], "failed");
     assert!(
         report["health_errors"]
             .as_array()
