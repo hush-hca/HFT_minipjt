@@ -7,6 +7,18 @@ channel_capacity = 8192
 batch_rows = 4096
 flush_interval_ms = 1000
 
+[cost]
+binance_taker_rate = "0.0004"
+bybit_taker_rate = "0.00055"
+entry_slippage_bps = "2"
+exit_slippage_bps = "10"
+entry_book_impact_bps = "2"
+exit_book_impact_bps = "3"
+basis_risk_buffer_bps = "5"
+funding_error_buffer_bps = "3"
+leg_risk_buffer_bps = "2"
+research_quote_per_leg = "100"
+
 [[quote_conversions]]
 base = "USDT"
 quote = "KRW"

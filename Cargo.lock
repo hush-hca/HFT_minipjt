@@ -591,11 +591,21 @@ name = "funding-core"
 version = "0.1.0"
 dependencies = [
  "md-core",
+ "num-bigint",
+ "num-traits",
  "serde",
  "thiserror",
  "toml",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "funding-features"
+version = "0.1.0"
+dependencies = [
+ "funding-core",
+ "md-core",
 ]
 
 [[package]]

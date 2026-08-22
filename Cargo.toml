@@ -5,6 +5,7 @@ members = [
     "crates/md-storage",
     "crates/collector",
     "crates/funding-core",
+    "crates/funding-features",
     "crates/funding-app",
 ]
 resolver = "2"

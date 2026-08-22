@@ -2,9 +2,13 @@ use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use num_bigint::BigInt;
+use num_traits::{Signed, ToPrimitive, Zero};
+use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 use url::Url;
+
+use crate::opportunity::CapacitySource;
 
 const REQUIRED_VENUES: [&str; 2] = ["binance_usdm", "bybit_linear"];
 
@@ -17,8 +21,147 @@ pub struct FundingConfig {
     pub channel_capacity: usize,
     pub batch_rows: usize,
     pub flush_interval_ms: u64,
+    pub cost: CostConfig,
     pub poll: PollConfig,
     pub venues: BTreeMap<String, VenueConfig>,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Serialize)]
+pub struct ExactDecimal(i128);
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DecimalRounding {
+    TowardZero,
+    Floor,
+    Ceiling,
+    HalfAwayFromZero,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Error)]
+pub enum DecimalMathError {
+    #[error("coefficient exceeds Decimal128(38,18) precision")]
+    PrecisionOverflow,
+    #[error("decimal addition overflowed")]
+    AdditionOverflow,
+    #[error("decimal subtraction overflowed")]
+    SubtractionOverflow,
+    #[error("division by zero")]
+    DivisionByZero,
+}
+
+impl ExactDecimal {
+    pub const SCALE: i128 = 1_000_000_000_000_000_000;
+    pub const MAX_COEFFICIENT: i128 = 10_i128.pow(38) - 1;
+
+    pub fn from_scaled(value: i128) -> Result<Self, DecimalMathError> {
+        if value.unsigned_abs() > Self::MAX_COEFFICIENT as u128 {
+            Err(DecimalMathError::PrecisionOverflow)
+        } else {
+            Ok(Self(value))
+        }
+    }
+
+    pub const fn scaled(self) -> i128 {
+        self.0
+    }
+
+    pub fn checked_add(self, rhs: Self) -> Result<Self, DecimalMathError> {
+        self.0
+            .checked_add(rhs.0)
+            .ok_or(DecimalMathError::AdditionOverflow)
+            .and_then(Self::from_scaled)
+    }
+
+    pub fn checked_sub(self, rhs: Self) -> Result<Self, DecimalMathError> {
+        self.0
+            .checked_sub(rhs.0)
+            .ok_or(DecimalMathError::SubtractionOverflow)
+            .and_then(Self::from_scaled)
+    }
+
+    pub fn checked_mul(
+        self,
+        rhs: Self,
+        rounding: DecimalRounding,
+    ) -> Result<Self, DecimalMathError> {
+        let numerator = BigInt::from(self.0) * BigInt::from(rhs.0);
+        scaled_quotient(numerator, BigInt::from(Self::SCALE), rounding)
+    }
+
+    pub fn checked_div(
+        self,
+        rhs: Self,
+        rounding: DecimalRounding,
+    ) -> Result<Self, DecimalMathError> {
+        if rhs.0 == 0 {
+            return Err(DecimalMathError::DivisionByZero);
+        }
+        let numerator = BigInt::from(self.0) * BigInt::from(Self::SCALE);
+        scaled_quotient(numerator, BigInt::from(rhs.0), rounding)
+    }
+}
+
+fn scaled_quotient(
+    mut numerator: BigInt,
+    mut denominator: BigInt,
+    rounding: DecimalRounding,
+) -> Result<ExactDecimal, DecimalMathError> {
+    if denominator.is_negative() {
+        numerator = -numerator;
+        denominator = -denominator;
+    }
+    let quotient = &numerator / &denominator;
+    let remainder = &numerator % &denominator;
+    let rounded = if remainder.is_zero() {
+        quotient
+    } else {
+        let direction = if numerator.is_negative() { -1 } else { 1 };
+        match rounding {
+            DecimalRounding::TowardZero => quotient,
+            DecimalRounding::Floor if numerator.is_negative() => quotient - 1,
+            DecimalRounding::Floor => quotient,
+            DecimalRounding::Ceiling if numerator.is_positive() => quotient + 1,
+            DecimalRounding::Ceiling => quotient,
+            DecimalRounding::HalfAwayFromZero if remainder.abs() * 2 >= denominator.abs() => {
+                quotient + direction
+            }
+            DecimalRounding::HalfAwayFromZero => quotient,
+        }
+    };
+    rounded
+        .to_i128()
+        .ok_or(DecimalMathError::PrecisionOverflow)
+        .and_then(ExactDecimal::from_scaled)
+}
+
+impl<'de> Deserialize<'de> for ExactDecimal {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        md_core::decimal::parse_decimal_18(&value)
+            .map_err(serde::de::Error::custom)
+            .and_then(|value| Self::from_scaled(value).map_err(serde::de::Error::custom))
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CostConfig {
+    pub binance_taker_rate: ExactDecimal,
+    pub bybit_taker_rate: ExactDecimal,
+    pub entry_slippage_bps: ExactDecimal,
+    pub exit_slippage_bps: ExactDecimal,
+    pub entry_book_impact_bps: ExactDecimal,
+    pub exit_book_impact_bps: ExactDecimal,
+    pub basis_risk_buffer_bps: ExactDecimal,
+    pub funding_error_buffer_bps: ExactDecimal,
+    pub leg_risk_buffer_bps: ExactDecimal,
+    pub research_quote_per_leg: ExactDecimal,
+    #[serde(skip, default = "configured_research_limit")]
+    pub capacity_source: CapacitySource,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -107,6 +250,7 @@ impl FundingConfig {
         require_positive("channel_capacity", self.channel_capacity)?;
         require_positive("batch_rows", self.batch_rows)?;
         require_positive("flush_interval_ms", self.flush_interval_ms)?;
+        self.cost.validate()?;
         require_minimum("poll.instrument_secs", self.poll.instrument_secs, 900)?;
         require_minimum("poll.open_interest_secs", self.poll.open_interest_secs, 5)?;
         require_minimum("poll.trader_ratio_secs", self.poll.trader_ratio_secs, 300)?;
@@ -168,6 +312,63 @@ impl FundingConfig {
                 }
             }
         }
+        Ok(())
+    }
+}
+
+impl CostConfig {
+    fn validate(&self) -> Result<(), FundingConfigError> {
+        require_exact_positive("cost.binance_taker_rate", self.binance_taker_rate)?;
+        require_exact_positive("cost.bybit_taker_rate", self.bybit_taker_rate)?;
+        require_exact_at_most_one("cost.binance_taker_rate", self.binance_taker_rate)?;
+        require_exact_at_most_one("cost.bybit_taker_rate", self.bybit_taker_rate)?;
+        require_exact_nonnegative("cost.entry_slippage_bps", self.entry_slippage_bps)?;
+        require_exact_nonnegative("cost.exit_slippage_bps", self.exit_slippage_bps)?;
+        require_exact_nonnegative("cost.entry_book_impact_bps", self.entry_book_impact_bps)?;
+        require_exact_nonnegative("cost.exit_book_impact_bps", self.exit_book_impact_bps)?;
+        require_exact_nonnegative("cost.basis_risk_buffer_bps", self.basis_risk_buffer_bps)?;
+        require_exact_nonnegative(
+            "cost.funding_error_buffer_bps",
+            self.funding_error_buffer_bps,
+        )?;
+        require_exact_nonnegative("cost.leg_risk_buffer_bps", self.leg_risk_buffer_bps)?;
+        require_exact_positive("cost.research_quote_per_leg", self.research_quote_per_leg)?;
+
+        const MAX_RESEARCH_QUOTE_PER_LEG: i128 = 100_000_000_000_000_000_000;
+        if self.research_quote_per_leg.scaled() > MAX_RESEARCH_QUOTE_PER_LEG {
+            return invalid("cost.research_quote_per_leg must not exceed 100 USDT");
+        }
+        if self.capacity_source != CapacitySource::ConfiguredResearchLimit {
+            return invalid("cost.capacity_source must be configured_research_limit");
+        }
+        Ok(())
+    }
+}
+
+fn configured_research_limit() -> CapacitySource {
+    CapacitySource::ConfiguredResearchLimit
+}
+
+fn require_exact_positive(field: &str, value: ExactDecimal) -> Result<(), FundingConfigError> {
+    if value.scaled() <= 0 {
+        invalid(format!("{field} must be positive"))
+    } else {
+        Ok(())
+    }
+}
+
+fn require_exact_nonnegative(field: &str, value: ExactDecimal) -> Result<(), FundingConfigError> {
+    if value.scaled() < 0 {
+        invalid(format!("{field} must not be negative"))
+    } else {
+        Ok(())
+    }
+}
+
+fn require_exact_at_most_one(field: &str, value: ExactDecimal) -> Result<(), FundingConfigError> {
+    if value.scaled() > ExactDecimal::SCALE {
+        invalid(format!("{field} must not exceed one"))
+    } else {
         Ok(())
     }
 }
