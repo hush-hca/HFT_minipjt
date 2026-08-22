@@ -9,3 +9,6 @@ publish.workspace = true
 [dependencies]
 funding-core = { path = "../funding-core" }
 md-core = { path = "../md-core" }
+num-bigint = "0.4.6"
+num-traits = "0.2.19"
+uuid = "1.24.1"

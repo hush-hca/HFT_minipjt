@@ -7,13 +7,30 @@ use crate::config::ExactDecimal;
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct FeatureSource {
     pub event_id: Uuid,
+    pub adapter: AdapterId,
+    pub symbol: CanonicalSymbol,
+    pub source_sequence: Option<u64>,
     pub exchange_event_ts_us: Option<i64>,
+    pub exchange_trade_ts_us: Option<i64>,
     pub local_recv_ts_us: i64,
+    pub effective_ts_us: i64,
+    pub effective_ts_source: EffectiveTimestampSource,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EffectiveTimestampSource {
+    ExchangeTrade,
+    ExchangeEvent,
+    LocalReceive,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct BookIdentity {
     pub event_id: Uuid,
+    pub adapter: AdapterId,
+    pub symbol: CanonicalSymbol,
+    pub source_sequence: Option<u64>,
     pub exchange_event_ts_us: Option<i64>,
     pub local_recv_ts_us: i64,
 }
@@ -33,6 +50,12 @@ pub enum FeatureInvalidReason {
     NonPositiveValue,
     ArithmeticOverflow,
     InvalidQuantity,
+    InvalidFreshnessLimit {
+        limit_us: i64,
+    },
+    StructuralBookInvalid {
+        reason: BookInvalidReason,
+    },
     Stale {
         age_us: i64,
         limit_us: i64,
@@ -44,6 +67,36 @@ pub enum FeatureInvalidReason {
     RegressingTimestamp {
         previous_ts_us: i64,
         current_ts_us: i64,
+    },
+    RegressingSourceSequence {
+        previous_sequence: u64,
+        current_sequence: u64,
+    },
+    SourceSequenceConflict {
+        sequence: u64,
+    },
+    PreviousBookReceiveOrderInvalid {
+        previous_local_recv_ts_us: i64,
+        current_local_recv_ts_us: i64,
+    },
+    FlowIdentityMismatch {
+        expected_adapter: AdapterId,
+        expected_symbol: CanonicalSymbol,
+        actual_adapter: AdapterId,
+        actual_symbol: CanonicalSymbol,
+    },
+    SourceTimestampOutOfRange {
+        source_ts_us: i64,
+        local_recv_ts_us: i64,
+    },
+    PreviousBookInvalid {
+        reason: BookInvalidReason,
+    },
+    PreviousBookIdentityMismatch {
+        previous_adapter: AdapterId,
+        previous_symbol: CanonicalSymbol,
+        current_adapter: AdapterId,
+        current_symbol: CanonicalSymbol,
     },
     MissingConversion,
     InsufficientDepth {
@@ -60,7 +113,16 @@ pub enum BookInvalidReason {
     CrossedBook,
     LockedBook,
     NonPositivePrice,
-    NegativeQuantity,
+    NonPositiveQuantity,
+    DuplicatePriceLevel {
+        side: BookLevelSide,
+        price: ExactDecimal,
+    },
+    UnsortedLevels {
+        side: BookLevelSide,
+        previous_price: ExactDecimal,
+        current_price: ExactDecimal,
+    },
     FutureTimestamp {
         source_ts_us: i64,
         decision_ts_us: i64,
@@ -78,6 +140,21 @@ pub enum StructuralBookValidity {
     Invalid(BookInvalidReason),
 }
 
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BookComparisonValidity {
+    NotRequested,
+    Valid,
+    Invalid(FeatureInvalidReason),
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BookLevelSide {
+    Bid,
+    Ask,
+}
+
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutableQuoteSide {
@@ -90,7 +167,14 @@ pub enum ExecutableQuoteSide {
 pub enum QuoteInvalidReason {
     StructuralBookInvalid,
     InvalidQuantity,
+    InvalidFreshnessLimit {
+        limit_us: i64,
+    },
     ArithmeticOverflow,
+    Stale {
+        age_us: i64,
+        limit_us: i64,
+    },
     FutureTimestamp {
         source_ts_us: i64,
         decision_ts_us: i64,
@@ -103,6 +187,14 @@ pub enum QuoteInvalidReason {
         requested_base: ExactDecimal,
         available_base: ExactDecimal,
     },
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct DepthDeltaLevel {
+    pub price: ExactDecimal,
+    pub previous_base: ExactDecimal,
+    pub current_base: ExactDecimal,
+    pub delta_base: ExactDecimal,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
@@ -147,6 +239,7 @@ pub struct BookFeatures {
     pub source: FeatureSource,
     pub previous_book: Option<BookIdentity>,
     pub structural_validity: StructuralBookValidity,
+    pub comparison_validity: BookComparisonValidity,
     pub sell_into_bids: ExecutableQuote,
     pub buy_from_asks: ExecutableQuote,
     pub mid: Option<ExactDecimal>,
@@ -158,6 +251,8 @@ pub struct BookFeatures {
     pub snapshot_ofi: Option<ExactDecimal>,
     pub depth_delta_bid: Option<ExactDecimal>,
     pub depth_delta_ask: Option<ExactDecimal>,
+    pub depth_delta_bids: Vec<DepthDeltaLevel>,
+    pub depth_delta_asks: Vec<DepthDeltaLevel>,
     pub validity: FeatureValidity,
 }
 
@@ -174,6 +269,7 @@ impl BookFeatures {
             source,
             previous_book,
             structural_validity,
+            comparison_validity: BookComparisonValidity::Invalid(reason.clone()),
             sell_into_bids,
             buy_from_asks,
             mid: None,
@@ -185,6 +281,8 @@ impl BookFeatures {
             snapshot_ofi: None,
             depth_delta_bid: None,
             depth_delta_ask: None,
+            depth_delta_bids: Vec::new(),
+            depth_delta_asks: Vec::new(),
             validity: FeatureValidity::Invalid(reason),
         }
     }
@@ -240,6 +338,7 @@ pub struct FlowFeatures {
     pub signed_volume_imbalance: Option<ExactDecimal>,
     pub cumulative_volume_delta: ExactDecimal,
     pub burst_count: u64,
+    pub burst_trade_rate_per_second: Option<ExactDecimal>,
     pub mean_inter_trade_us: Option<i64>,
     pub validity: FeatureValidity,
 }
@@ -304,6 +403,10 @@ impl FlowFeatures {
             signed_volume_imbalance: None,
             cumulative_volume_delta: zero,
             burst_count: 0,
+            burst_trade_rate_per_second: match state {
+                FlowInputState::NoInput => None,
+                FlowInputState::ZeroActivity | FlowInputState::Activity => Some(zero),
+            },
             mean_inter_trade_us: None,
             validity,
         }
@@ -350,5 +453,5 @@ pub enum FeatureEvent {
         decision_ts_us: i64,
         value: Box<FlowFeatures>,
     },
-    Basis(BasisFeature),
+    Basis(Box<BasisFeature>),
 }

@@ -606,6 +606,9 @@ version = "0.1.0"
 dependencies = [
  "funding-core",
  "md-core",
+ "num-bigint",
+ "num-traits",
+ "uuid",
 ]
 
 [[package]]

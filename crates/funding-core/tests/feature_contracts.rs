@@ -2,10 +2,10 @@ use funding_core::{
     calendar::{FundingCalendar, FundingSlot, FundingSlotEvidence, FundingTimestampSource},
     config::{DecimalMathError, DecimalRounding, ExactDecimal, FundingConfig},
     feature::{
-        BookFeatures, BookIdentity, BookInvalidReason, ExecutableQuote, ExecutableQuoteSide,
-        FeatureInvalidReason, FeatureSource, FeatureValidity, FlowFeatures, FlowInputState,
-        FlowPolicy, OutOfOrderPolicy, QuoteInvalidReason, QuoteValidity, StructuralBookValidity,
-        TradeDedupePolicy,
+        BookFeatures, BookIdentity, BookInvalidReason, EffectiveTimestampSource, ExecutableQuote,
+        ExecutableQuoteSide, FeatureInvalidReason, FeatureSource, FeatureValidity, FlowFeatures,
+        FlowInputState, FlowPolicy, OutOfOrderPolicy, QuoteInvalidReason, QuoteValidity,
+        StructuralBookValidity, TradeDedupePolicy,
     },
     opportunity::{
         CapacityAssessment, CapacityEvidence, CapacityEvidenceValidity, CapacitySource, CostModel,
@@ -25,8 +25,14 @@ fn exact(value: i128) -> ExactDecimal {
 fn source(ts_us: i64) -> FeatureSource {
     FeatureSource {
         event_id: Uuid::now_v7(),
+        adapter: AdapterId::BinanceUsdm,
+        symbol: CanonicalSymbol::new("BTC", "USDT"),
+        source_sequence: Some(1),
         exchange_event_ts_us: Some(ts_us),
+        exchange_trade_ts_us: None,
         local_recv_ts_us: ts_us + 10,
+        effective_ts_us: ts_us,
+        effective_ts_source: EffectiveTimestampSource::ExchangeEvent,
     }
 }
 
@@ -53,6 +59,9 @@ fn executable_quotes_are_side_specific_and_separate_from_book_structure() {
     let current = source(1_800_000_000_000_000);
     let previous = BookIdentity {
         event_id: Uuid::now_v7(),
+        adapter: AdapterId::BinanceUsdm,
+        symbol: CanonicalSymbol::new("BTC", "USDT"),
+        source_sequence: Some(0),
         exchange_event_ts_us: Some(1_799_999_999_999_000),
         local_recv_ts_us: 1_799_999_999_999_010,
     };
