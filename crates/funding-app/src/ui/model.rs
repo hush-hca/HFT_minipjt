@@ -46,6 +46,15 @@ pub struct BookLevel {
     pub quantity: i128,
 }
 
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct MarketSummary {
+    pub symbol: String,
+    pub venue: String,
+    pub book_events: u64,
+    pub trade_events: u64,
+    pub freshness_ms: u64,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct MarketDetailView {
     pub symbol: String,
@@ -108,6 +117,7 @@ pub struct UiSnapshot {
     pub sequence: u64,
     pub generated_at_us: i64,
     pub opportunities: Vec<OpportunityRow>,
+    pub markets: Vec<MarketSummary>,
     pub market: MarketDetailView,
     pub strategy: StrategyOrdersView,
     pub health: SystemHealthView,
@@ -115,6 +125,28 @@ pub struct UiSnapshot {
 }
 
 impl UiSnapshot {
+    pub fn starting() -> Self {
+        let mut snapshot = Self::demo();
+        snapshot.opportunities.clear();
+        snapshot.markets.clear();
+        snapshot.market.symbol = "WAITING FOR MARKET DATA".into();
+        snapshot.market.venue = "UNAVAILABLE".into();
+        snapshot.market.bids.clear();
+        snapshot.market.asks.clear();
+        snapshot.market.mid_price = None;
+        snapshot.market.micro_price = None;
+        snapshot.market.mid_history.clear();
+        snapshot.market.micro_history.clear();
+        snapshot.market.basis_bps = None;
+        snapshot.market.open_interest = None;
+        snapshot.market.top_trader_ratio_ppm = None;
+        snapshot.market.cvd = None;
+        snapshot.market.order_flow_imbalance_ppm = None;
+        snapshot.market.latency_us = None;
+        snapshot.market.freshness_ms = u64::MAX;
+        snapshot
+    }
+
     pub fn demo() -> Self {
         let unavailable = ControlAvailability::Disabled {
             code: "EXECUTION_ENGINE_UNAVAILABLE".into(),
@@ -163,6 +195,13 @@ impl UiSnapshot {
                     exclusion: None,
                 },
             ],
+            markets: vec![MarketSummary {
+                symbol: "BTC/USDT".into(),
+                venue: "Binance USD-M".into(),
+                book_events: 1,
+                trade_events: 1,
+                freshness_ms: 180,
+            }],
             market: MarketDetailView {
                 symbol: "BTC/USDT".into(),
                 venue: "Binance USD-M".into(),

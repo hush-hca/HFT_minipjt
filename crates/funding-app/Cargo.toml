@@ -13,6 +13,7 @@ gui = ["dep:iced"]
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
+collector = { path = "../collector" }
 futures-util = { version = "0.3", features = ["sink"] }
 funding-core = { path = "../funding-core" }
 funding-features = { path = "../funding-features" }

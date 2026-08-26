@@ -1,10 +1,16 @@
 use std::path::PathBuf;
+#[cfg(feature = "gui")]
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+#[cfg(feature = "gui")]
+use collector::CollectorApp;
 use funding_app::Phase2Collector;
 use funding_core::config::FundingConfig;
+#[cfg(feature = "gui")]
+use md_core::config::CollectorConfig;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 
@@ -33,6 +39,8 @@ enum Command {
     Gui {
         #[arg(long, default_value = "config/funding.toml", value_name = "PATH")]
         config: PathBuf,
+        #[arg(long, default_value = "config/default.toml", value_name = "PATH")]
+        market_config: PathBuf,
     },
 }
 
@@ -61,26 +69,54 @@ async fn main() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         #[cfg(feature = "gui")]
-        Command::Gui { config } => {
+        Command::Gui {
+            config,
+            market_config,
+        } => {
             let config = FundingConfig::load(&config)?;
-            let initial = funding_app::ui::model::UiSnapshot::demo();
+            let market_config = CollectorConfig::load(&market_config)?;
+            let initial = funding_app::ui::model::UiSnapshot::starting();
             let (publisher, subscriber) =
                 funding_app::ui::bridge::ui_snapshot_channel(initial.clone());
+            let selection =
+                funding_app::ui::live::MarketSelection::new("Binance USD-M", "BTC/USDT");
+            let ui_state = Arc::new(Mutex::new(funding_app::ui::live::LiveUiState::new(
+                publisher,
+                initial.clone(),
+                selection.clone(),
+            )));
             let shutdown = CancellationToken::new();
-            let collector =
-                Phase2Collector::new(config)?.with_ui_publisher(publisher, initial.clone());
-            let collector_shutdown = shutdown.clone();
-            let collector_task =
-                tokio::spawn(async move { collector.run(collector_shutdown).await });
-            let ui_result = funding_app::ui::run_live_gui(initial, subscriber);
+            let funding_collector = Phase2Collector::new(config)?.with_ui_state(ui_state.clone());
+            let market_collector = CollectorApp::new(market_config)?.with_event_observer(Arc::new(
+                funding_app::ui::live::SharedLiveUiObserver::new(ui_state),
+            ));
+            let funding_shutdown = shutdown.clone();
+            let funding_task =
+                tokio::spawn(async move { funding_collector.run(funding_shutdown).await });
+            let market_shutdown = shutdown.clone();
+            let market_task =
+                tokio::spawn(async move { market_collector.run(market_shutdown).await });
+            let ui_result = funding_app::ui::run_live_gui(initial, subscriber, selection);
             shutdown.cancel();
-            match collector_task.await {
+            match funding_task.await {
                 Ok(Ok(report)) => tracing::info!(
                     status = ?report.status,
-                    "collector stopped after GUI shutdown"
+                    "funding collector stopped after GUI shutdown"
                 ),
-                Ok(Err(error)) => tracing::error!(%error, "collector stopped with an error"),
-                Err(error) => tracing::error!(%error, "collector task panicked"),
+                Ok(Err(error)) => {
+                    tracing::error!(%error, "funding collector stopped with an error")
+                }
+                Err(error) => tracing::error!(%error, "funding collector task panicked"),
+            }
+            match market_task.await {
+                Ok(Ok(report)) => tracing::info!(
+                    status = %report.status,
+                    "core market collector stopped after GUI shutdown"
+                ),
+                Ok(Err(error)) => {
+                    tracing::error!(%error, "core market collector stopped with an error")
+                }
+                Err(error) => tracing::error!(%error, "core market collector task panicked"),
             }
             ui_result?;
         }

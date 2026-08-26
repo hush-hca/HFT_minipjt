@@ -6,6 +6,7 @@ use funding_app::ui::model::{ControlAvailability, ModeLabel, UiSnapshot};
 fn snapshot_has_all_read_only_views_without_secrets() {
     let snapshot = UiSnapshot::demo();
     assert!(!snapshot.opportunities.is_empty());
+    assert!(!snapshot.markets.is_empty());
     assert_eq!(snapshot.market.bids.len(), 20);
     assert_eq!(snapshot.market.asks.len(), 20);
     assert_eq!(snapshot.risk.mode, ModeLabel::Monitor);

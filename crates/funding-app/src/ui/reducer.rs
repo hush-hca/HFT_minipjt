@@ -14,6 +14,7 @@ pub enum Message {
     Navigate(Screen),
     FilterChanged(String),
     SelectSymbol(String),
+    SelectMarket { symbol: String, venue: String },
     Snapshot(Box<UiSnapshot>),
     PollSnapshot,
     ArmPressed,
@@ -26,6 +27,7 @@ pub struct FundingGuiState {
     pub screen: Screen,
     pub filter: String,
     pub selected_symbol: Option<String>,
+    pub selected_venue: Option<String>,
     pub snapshot: UiSnapshot,
     pub last_notice: Option<String>,
 }
@@ -33,10 +35,12 @@ pub struct FundingGuiState {
 impl FundingGuiState {
     pub fn new(snapshot: UiSnapshot) -> Self {
         let selected_symbol = snapshot.opportunities.first().map(|row| row.symbol.clone());
+        let selected_venue = snapshot.markets.first().map(|row| row.venue.clone());
         Self {
             screen: Screen::Opportunities,
             filter: String::new(),
             selected_symbol,
+            selected_venue,
             snapshot,
             last_notice: None,
         }
@@ -48,9 +52,21 @@ impl FundingGuiState {
             Message::FilterChanged(value) => self.filter = value,
             Message::SelectSymbol(symbol) => {
                 self.selected_symbol = Some(symbol);
+                self.selected_venue = Some("Binance USD-M".into());
                 self.screen = Screen::Market;
             }
-            Message::Snapshot(snapshot) => self.snapshot = *snapshot,
+            Message::SelectMarket { symbol, venue } => {
+                self.selected_symbol = Some(symbol);
+                self.selected_venue = Some(venue);
+                self.screen = Screen::Market;
+            }
+            Message::Snapshot(snapshot) => {
+                self.snapshot = *snapshot;
+                if self.selected_symbol.is_none() && !self.snapshot.markets.is_empty() {
+                    self.selected_symbol = Some(self.snapshot.market.symbol.clone());
+                    self.selected_venue = Some(self.snapshot.market.venue.clone());
+                }
+            }
             Message::PollSnapshot => {}
             Message::ArmPressed
             | Message::CancelAllPressed

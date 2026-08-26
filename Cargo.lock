@@ -1444,6 +1444,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "collector",
  "funding-core",
  "funding-features",
  "futures-util",

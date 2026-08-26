@@ -13,8 +13,8 @@
 ## Implementation Status — 2026-08-27
 
 - Complete: pinned iced 0.13.1, five-screen read-only shell, immutable snapshot contracts, nonblocking Tokio `watch` bridge, filter/selection reducer, top-20 book display, mid/microprice history, funding rows, system-health surface, disabled execution controls, CLI, Windows release build, workspace tests, and strict Clippy.
-- Live: the GUI consumes the existing public Phase 2 collector stream while the same events continue to Arrow storage. Binance USD-M BTC books/trades feed exact `funding-features` mid, microprice, snapshot OFI, and 5-second CVD; derivatives events feed funding gaps, basis, OI, and venue-specific trader ratios.
-- Still required for the full Phase 2C gate: selectable live market state for every configured venue/symbol, Canvas chart rendering, complete conservative-cost/capacity mapping instead of `COST_MODEL_PENDING`, detailed presenter modules for execution views, GUI/data-plane failure-state tests, and the three-OS CI workflow.
+- Live: the GUI consumes both the original four-venue Phase 1 collector and the public Phase 2 funding collector while each continues to its own Arrow output root. Every observed venue/symbol has bounded independent book/flow/history state; the GUI snapshot copies only summaries plus the selected market detail. Exact `funding-features` calculations provide mid, microprice, snapshot OFI, and 5-second CVD; derivatives events feed funding gaps, basis, OI, and venue-specific trader ratios.
+- Still required for the full Phase 2C gate: complete conservative-cost/capacity mapping instead of `COST_MODEL_PENDING`, detailed presenter modules for execution views, remaining GUI/data-plane failure-state tests, and the three-OS CI workflow.
 - Safety: this remains read-only. Strategy, order, and risk mutation controls cannot emit an operator command and display `EXECUTION_ENGINE_UNAVAILABLE`.
 
 ## Global Constraints

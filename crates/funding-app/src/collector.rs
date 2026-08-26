@@ -81,10 +81,11 @@ fn default_ui_hook() -> UiHook {}
 #[cfg(feature = "gui")]
 fn publish_market_ui(hook: &UiHook, event: &NormalizedEvent) {
     if let Some(state) = hook {
-        state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .market(event);
+        match state.try_lock() {
+            Ok(mut state) => state.market(event),
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner().market(event),
+            Err(std::sync::TryLockError::WouldBlock) => {}
+        }
     }
 }
 
@@ -94,10 +95,11 @@ fn publish_market_ui(_hook: &UiHook, _event: &NormalizedEvent) {}
 #[cfg(feature = "gui")]
 fn publish_derivative_ui(hook: &UiHook, event: &DerivativeEvent) {
     if let Some(state) = hook {
-        state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .derivative(event);
+        match state.try_lock() {
+            Ok(mut state) => state.derivative(event),
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner().derivative(event),
+            Err(std::sync::TryLockError::WouldBlock) => {}
+        }
     }
 }
 
@@ -226,7 +228,16 @@ impl Phase2Collector {
         publisher: UiSnapshotPublisher,
         initial: UiSnapshot,
     ) -> Self {
-        self.ui = Some(Arc::new(Mutex::new(LiveUiState::new(publisher, initial))));
+        let selection = crate::ui::live::MarketSelection::new("Binance USD-M", "BTC/USDT");
+        self.ui = Some(Arc::new(Mutex::new(LiveUiState::new(
+            publisher, initial, selection,
+        ))));
+        self
+    }
+
+    #[cfg(feature = "gui")]
+    pub fn with_ui_state(mut self, state: Arc<Mutex<LiveUiState>>) -> Self {
+        self.ui = Some(state);
         self
     }
 

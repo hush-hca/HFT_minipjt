@@ -3,8 +3,8 @@ mod report;
 mod stats;
 
 pub use app::{
-    AdapterSupervisor, CollectorApp, DiscoveryFuture, MarketDiscovery, SnapshotEmitter,
-    SupervisorFuture,
+    AdapterSupervisor, CollectorApp, DiscoveryFuture, MarketDiscovery, MarketEventObserver,
+    SnapshotEmitter, SupervisorFuture,
 };
 pub use report::{MissingMarkets, RecoveryRecord, RunReport};
 pub use stats::{

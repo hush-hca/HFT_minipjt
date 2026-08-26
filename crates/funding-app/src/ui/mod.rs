@@ -1,4 +1,5 @@
 pub mod bridge;
+pub mod chart;
 pub mod live;
 pub mod model;
 pub mod reducer;
@@ -7,38 +8,54 @@ use iced::widget::{button, column, container, row, scrollable, text, text_input}
 use iced::{Element, Length, Subscription, Task, Theme};
 
 use bridge::UiSnapshotSubscriber;
+use live::MarketSelection;
 use model::{ControlAvailability, UiSnapshot, decimal};
 use reducer::{FundingGuiState, Message, Screen};
 
 pub fn run_gui(initial: UiSnapshot) -> iced::Result {
-    run_gui_with_subscriber(initial, None)
+    run_gui_with_subscriber(
+        initial,
+        None,
+        MarketSelection::new("Binance USD-M", "BTC/USDT"),
+    )
 }
 
-pub fn run_live_gui(initial: UiSnapshot, subscriber: UiSnapshotSubscriber) -> iced::Result {
-    run_gui_with_subscriber(initial, Some(subscriber))
+pub fn run_live_gui(
+    initial: UiSnapshot,
+    subscriber: UiSnapshotSubscriber,
+    selection: MarketSelection,
+) -> iced::Result {
+    run_gui_with_subscriber(initial, Some(subscriber), selection)
 }
 
 fn run_gui_with_subscriber(
     initial: UiSnapshot,
     subscriber: Option<UiSnapshotSubscriber>,
+    selection: MarketSelection,
 ) -> iced::Result {
     iced::application("HFT Market & Funding Monitor", App::update, App::view)
         .theme(|_| Theme::Dark)
         .window_size((1440.0, 900.0))
         .subscription(App::subscription)
-        .run_with(|| (App::new(initial, subscriber), Task::none()))
+        .run_with(|| (App::new(initial, subscriber, selection), Task::none()))
 }
 
 struct App {
     state: FundingGuiState,
     subscriber: Option<UiSnapshotSubscriber>,
+    selection: MarketSelection,
 }
 
 impl App {
-    fn new(snapshot: UiSnapshot, subscriber: Option<UiSnapshotSubscriber>) -> Self {
+    fn new(
+        snapshot: UiSnapshot,
+        subscriber: Option<UiSnapshotSubscriber>,
+        selection: MarketSelection,
+    ) -> Self {
         Self {
             state: FundingGuiState::new(snapshot),
             subscriber,
+            selection,
         }
     }
 
@@ -50,6 +67,15 @@ impl App {
                 let _ = self.state.update(Message::Snapshot(Box::new(snapshot)));
             }
         } else {
+            match &message {
+                Message::SelectSymbol(symbol) => {
+                    self.selection.select("Binance USD-M", symbol.clone());
+                }
+                Message::SelectMarket { symbol, venue } => {
+                    self.selection.select(venue.clone(), symbol.clone());
+                }
+                _ => {}
+            }
             let _ = self.state.update(message);
         }
         Task::none()
@@ -161,6 +187,20 @@ impl App {
     fn market(&self) -> Element<'_, Message> {
         const SCALE: i128 = 1_000_000_000_000_000_000;
         let market = &self.state.snapshot.market;
+        let mut markets = column![text("Markets").size(18)].spacing(4);
+        for item in &self.state.snapshot.markets {
+            let selected = self.state.selected_symbol.as_deref() == Some(&item.symbol)
+                && self.state.selected_venue.as_deref() == Some(&item.venue);
+            let prefix = if selected { "● " } else { "" };
+            let label = format!(
+                "{prefix}{} · {}  B:{} T:{}  {}ms",
+                item.symbol, item.venue, item.book_events, item.trade_events, item.freshness_ms
+            );
+            markets = markets.push(button(text(label)).on_press(Message::SelectMarket {
+                symbol: item.symbol.clone(),
+                venue: item.venue.clone(),
+            }));
+        }
         let mut book = column![row![
             fixed("BID PRICE", 140),
             fixed("BID QTY", 120),
@@ -201,16 +241,19 @@ impl App {
                 market.latency_us.map_or("—".into(), |v| format!("{v} µs"))
             ),
             metric("Freshness", format!("{} ms", market.freshness_ms)),
-            text("Mid / microprice chart (latest 120 samples)").size(16),
-            text(sparkline(&market.mid_history)),
-            text(sparkline(&market.micro_history)),
+            text("Mid / microprice chart · blue mid · green micro (max 3,600 points)").size(16),
+            chart::price_chart(&market.mid_history, &market.micro_history),
         ]
         .spacing(8)
         .width(Length::FillPortion(2));
-        row![scrollable(book).width(Length::FillPortion(3)), metrics]
-            .spacing(20)
-            .height(Length::Fill)
-            .into()
+        row![
+            scrollable(markets).width(Length::FillPortion(2)),
+            scrollable(book).width(Length::FillPortion(3)),
+            metrics
+        ]
+        .spacing(20)
+        .height(Length::Fill)
+        .into()
     }
 
     fn strategy(&self) -> Element<'_, Message> {
@@ -302,23 +345,6 @@ fn metric<'a>(label: &'a str, value: String) -> Element<'a, Message> {
     row![fixed(label, 190), text(value)].spacing(12).into()
 }
 
-fn sparkline(points: &[(i64, i128)]) -> String {
-    const BLOCKS: &[char] = &['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
-    let Some(min) = points.iter().map(|(_, value)| *value).min() else {
-        return "—".into();
-    };
-    let max = points.iter().map(|(_, value)| *value).max().unwrap_or(min);
-    let span = (max - min).max(1);
-    points
-        .iter()
-        .step_by((points.len() / 80).max(1))
-        .map(|(_, value)| {
-            let index = ((*value - min) * 7 / span) as usize;
-            BLOCKS[index]
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -329,7 +355,7 @@ mod tests {
         assert!(!snapshot.opportunities.is_empty());
         assert_eq!(snapshot.market.bids.len(), 20);
         assert_eq!(snapshot.market.asks.len(), 20);
-        assert!(!sparkline(&snapshot.market.mid_history).is_empty());
+        assert!(!snapshot.market.mid_history.is_empty());
         assert!(matches!(
             snapshot.risk.availability,
             ControlAvailability::Disabled { .. }

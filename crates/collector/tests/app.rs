@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use collector::{
     AdapterSnapshot, AdapterSupervisor, CollectorApp, DiscoveryFuture, GapRecord, MarketDiscovery,
-    RunReport, SnapshotEmitter, StatsRegistry, SupervisorFuture,
+    MarketEventObserver, RunReport, SnapshotEmitter, StatsRegistry, SupervisorFuture,
 };
 use md_core::config::{AdapterConfig, CollectorConfig, RetryConfig};
 use md_core::model::{
@@ -186,6 +186,32 @@ async fn graceful_shutdown_drains_storage_then_writes_final_report() {
             || path.ends_with("upbit/spot/BTC-KRW/2024-09-10/00")
     }));
     assert_eq!(report.missing_markets[0].symbols, ["ETH/KRW"]);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn stored_events_are_forwarded_to_the_optional_observer() {
+    let root = unique_root("event-observer");
+    let supervisor = Arc::new(FakeSupervisor::with_event(book_event()));
+    let observer = Arc::new(RecordingObserver::default());
+    let app = CollectorApp::with_services(
+        config(root.clone(), false, 10),
+        Arc::new(FakeDiscovery::all_available()),
+        supervisor.clone(),
+        Arc::new(RecordingEmitter::default()),
+    )
+    .unwrap()
+    .with_event_observer(observer.clone());
+    let shutdown = CancellationToken::new();
+    let running = tokio::spawn(app.run(shutdown.clone()));
+    supervisor.started.notified().await;
+    shutdown.cancel();
+
+    running.await.unwrap().unwrap();
+
+    let events = observer.events.lock().unwrap();
+    assert_eq!(events.len(), 1);
+    assert!(matches!(events[0], NormalizedEvent::Book(_)));
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -438,6 +464,17 @@ struct RecordingEmitter {
 impl SnapshotEmitter for RecordingEmitter {
     fn emit(&self, snapshot: &AdapterSnapshot) {
         self.records.lock().unwrap().push(snapshot.clone());
+    }
+}
+
+#[derive(Default)]
+struct RecordingObserver {
+    events: Mutex<Vec<NormalizedEvent>>,
+}
+
+impl MarketEventObserver for RecordingObserver {
+    fn observe(&self, event: &NormalizedEvent) {
+        self.events.lock().unwrap().push(event.clone());
     }
 }
 
