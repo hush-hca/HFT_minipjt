@@ -55,6 +55,13 @@ use crate::report::{
     ExcludedSymbol, FamilyCount, Phase2aReport, Phase2aStatus, PublicOnlyRequestSummary,
     SchedulerSummary,
 };
+#[cfg(feature = "gui")]
+use crate::ui::{bridge::UiSnapshotPublisher, live::LiveUiState, model::UiSnapshot};
+
+#[cfg(feature = "gui")]
+type UiHook = Option<Arc<Mutex<LiveUiState>>>;
+#[cfg(not(feature = "gui"))]
+type UiHook = ();
 
 const BINANCE_LIMIT_PER_MINUTE: u32 = 2_400;
 const BYBIT_PUBLIC_REQUESTS_PER_SECOND: u32 = 10;
@@ -62,6 +69,40 @@ const QUOTE_STALE_AFTER: Duration = Duration::from_secs(5);
 const BINANCE_TOP_TRADER_CODE: &str = "BINANCE_TOP_TRADER_REQUIRES_API_KEY";
 const NETWORK_TIMEOUT: Duration = Duration::from_secs(10);
 const WS_READ_TIMEOUT: Duration = Duration::from_secs(120);
+
+#[cfg(feature = "gui")]
+fn default_ui_hook() -> UiHook {
+    None
+}
+
+#[cfg(not(feature = "gui"))]
+fn default_ui_hook() -> UiHook {}
+
+#[cfg(feature = "gui")]
+fn publish_market_ui(hook: &UiHook, event: &NormalizedEvent) {
+    if let Some(state) = hook {
+        state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .market(event);
+    }
+}
+
+#[cfg(not(feature = "gui"))]
+fn publish_market_ui(_hook: &UiHook, _event: &NormalizedEvent) {}
+
+#[cfg(feature = "gui")]
+fn publish_derivative_ui(hook: &UiHook, event: &DerivativeEvent) {
+    if let Some(state) = hook {
+        state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .derivative(event);
+    }
+}
+
+#[cfg(not(feature = "gui"))]
+fn publish_derivative_ui(_hook: &UiHook, _event: &DerivativeEvent) {}
 
 type FundingRuleStore =
     Arc<Mutex<std::collections::HashMap<(AdapterId, CanonicalSymbol), FundingRules>>>;
@@ -139,6 +180,7 @@ enum Source {
 pub struct Phase2Collector {
     config: FundingConfig,
     source: Source,
+    ui: UiHook,
 }
 
 impl Phase2Collector {
@@ -150,6 +192,7 @@ impl Phase2Collector {
                 upbit_websocket: "wss://api.upbit.com/websocket/v1".to_owned(),
                 bithumb_websocket: "wss://pubwss.bithumb.com/pub/ws".to_owned(),
             },
+            ui: default_ui_hook(),
         })
     }
 
@@ -173,7 +216,18 @@ impl Phase2Collector {
         Ok(Self {
             config,
             source: Source::Synthetic(source),
+            ui: default_ui_hook(),
         })
+    }
+
+    #[cfg(feature = "gui")]
+    pub fn with_ui_publisher(
+        mut self,
+        publisher: UiSnapshotPublisher,
+        initial: UiSnapshot,
+    ) -> Self {
+        self.ui = Some(Arc::new(Mutex::new(LiveUiState::new(publisher, initial))));
+        self
     }
 
     pub async fn run(self, shutdown: CancellationToken) -> Result<Phase2aReport> {
@@ -189,6 +243,8 @@ impl Phase2Collector {
         let (market_tx, market_rx) = mpsc::channel(self.config.channel_capacity);
         let (derivative_tx, derivative_rx) = mpsc::channel(self.config.channel_capacity);
         let metrics = Arc::new(Metrics::default());
+        let market_ui = self.ui.clone();
+        let derivative_ui = self.ui.clone();
 
         // Durability consumers are alive before discovery or any producer starts.
         let market_store = tokio::spawn(market_storage_loop(
@@ -197,12 +253,14 @@ impl Phase2Collector {
             derivative_tx.clone(),
             Arc::clone(&metrics),
             Duration::from_millis(self.config.flush_interval_ms),
+            market_ui,
         ));
         let derivative_store = tokio::spawn(derivative_storage_loop(
             derivative_router,
             derivative_rx,
             Arc::clone(&metrics),
             Duration::from_millis(self.config.flush_interval_ms),
+            derivative_ui,
         ));
 
         let mut basis = ReportBasis::new(&self.config);
@@ -1757,6 +1815,7 @@ async fn market_storage_loop(
     derivative_tx: mpsc::Sender<DerivativeEvent>,
     metrics: Arc<Metrics>,
     flush_every: Duration,
+    ui: UiHook,
 ) -> Result<()> {
     let mut flush = tokio::time::interval(flush_every);
     flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -1764,6 +1823,7 @@ async fn market_storage_loop(
         tokio::select! {
             event = rx.recv() => match event {
                 Some(event) => {
+                    publish_market_ui(&ui, &event);
                     if let NormalizedEvent::Book(book) = &event
                         && book.meta.symbol.base == "USDT" && book.meta.symbol.quote == "KRW"
                     {
@@ -1787,13 +1847,18 @@ async fn derivative_storage_loop(
     mut rx: mpsc::Receiver<DerivativeEvent>,
     metrics: Arc<Metrics>,
     flush_every: Duration,
+    ui: UiHook,
 ) -> Result<()> {
     let mut flush = tokio::time::interval(flush_every);
     flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
             event = rx.recv() => match event {
-                Some(event) => { metrics.event(&event); router.push(event).await?; }
+                Some(event) => {
+                    publish_derivative_ui(&ui, &event);
+                    metrics.event(&event);
+                    router.push(event).await?;
+                }
                 None => break,
             },
             _ = flush.tick() => router.flush_due(Instant::now()).await?,

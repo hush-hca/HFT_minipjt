@@ -2,7 +2,25 @@
 
 This repository contains the completed Phase 1 market-data collector and the Phase 2A public derivatives collector. Phase 1 collects public order-book snapshots and individual trades from Upbit Spot, Bithumb Spot, Binance Spot, and Binance USDⓈ-M. Phase 2A adds Binance USDⓈ-M and Bybit Linear instrument rules, mark/index prices, indicative and settled funding, open interest, venue-specific trader ratios, Bybit reconstructed top-20 books, and executable USDT/KRW quote conversions.
 
-This remains data infrastructure only. It contains no strategy decisions, NBBO/microfeature engine, backtest, order placement or cancellation, fill reconciliation, risk engine, paper/testnet execution, or GUI. Do not run a strategy against it as though those components were included.
+The workspace now also contains read-only NBBO, basis, microfeature, funding-opportunity and deterministic replay components. An iced monitoring GUI is being added for those results. Order placement remains disabled: the OMS/reconciliation layer is not yet an accepted Binance testnet executor, so do not run a live strategy from this project.
+
+## Read-only HFT and funding GUI
+
+Build and open the cross-platform monitor:
+
+```powershell
+cargo build --release -p funding-app --features gui
+target\release\funding-app.exe gui --config config/funding.toml
+```
+
+The GUI has five views: Funding Opportunities, Market Detail, Strategy & Orders, System Health, and Risk & Controls. It shows top-20 book levels, mid/microprice history, basis, funding, open interest, top-trader ratio, tick/order-flow features and processing health. Until the execution acceptance gates pass, strategy/order values are explicitly unavailable and every mutating control returns `EXECUTION_ENGINE_UNAVAILABLE`.
+
+The current project specifications and boundaries are recorded in:
+
+- `docs/superpowers/specs/2026-08-19-market-data-collector-design.md`
+- `docs/superpowers/specs/2026-08-20-funding-arbitrage-hft-phase-2-design.md`
+- `docs/superpowers/plans/2026-08-20-phase-2c-iced-gui.md`
+- `docs/superpowers/plans/2026-08-20-phase-2e1-oms-binance-testnet.md`
 
 ## Phase 2A public derivatives collection
 

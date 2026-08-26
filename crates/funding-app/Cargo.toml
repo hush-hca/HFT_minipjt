@@ -6,12 +6,18 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+default = ["gui"]
+gui = ["dep:iced"]
+
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 futures-util = { version = "0.3", features = ["sink"] }
 funding-core = { path = "../funding-core" }
+funding-features = { path = "../funding-features" }
 humantime = "2"
+iced = { version = "=0.13.1", features = ["tokio", "canvas"], optional = true }
 md-core = { path = "../md-core" }
 md-exchanges = { path = "../md-exchanges" }
 md-storage = { path = "../md-storage" }

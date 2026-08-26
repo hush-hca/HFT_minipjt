@@ -7,6 +7,7 @@ members = [
     "crates/funding-core",
     "crates/funding-features",
     "crates/funding-app",
+    "crates/execution",
 ]
 resolver = "2"
 

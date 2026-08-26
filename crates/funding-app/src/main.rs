@@ -12,7 +12,7 @@ use tracing_subscriber::EnvFilter;
 #[command(
     name = "funding-app",
     version,
-    about = "Public derivatives metadata collector (no trading)"
+    about = "Public HFT market-data, funding analytics and read-only monitoring"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -27,6 +27,12 @@ enum Command {
         config: PathBuf,
         #[arg(long, value_name = "DURATION", value_parser = parse_duration)]
         duration: Option<Duration>,
+    },
+    /// Open the read-only HFT and funding monitor. This command cannot place orders.
+    #[cfg(feature = "gui")]
+    Gui {
+        #[arg(long, default_value = "config/funding.toml", value_name = "PATH")]
+        config: PathBuf,
     },
 }
 
@@ -53,6 +59,30 @@ async fn main() -> Result<()> {
             });
             let report = Phase2Collector::new(config)?.run(shutdown).await?;
             println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        #[cfg(feature = "gui")]
+        Command::Gui { config } => {
+            let config = FundingConfig::load(&config)?;
+            let initial = funding_app::ui::model::UiSnapshot::demo();
+            let (publisher, subscriber) =
+                funding_app::ui::bridge::ui_snapshot_channel(initial.clone());
+            let shutdown = CancellationToken::new();
+            let collector =
+                Phase2Collector::new(config)?.with_ui_publisher(publisher, initial.clone());
+            let collector_shutdown = shutdown.clone();
+            let collector_task =
+                tokio::spawn(async move { collector.run(collector_shutdown).await });
+            let ui_result = funding_app::ui::run_live_gui(initial, subscriber);
+            shutdown.cancel();
+            match collector_task.await {
+                Ok(Ok(report)) => tracing::info!(
+                    status = ?report.status,
+                    "collector stopped after GUI shutdown"
+                ),
+                Ok(Err(error)) => tracing::error!(%error, "collector stopped with an error"),
+                Err(error) => tracing::error!(%error, "collector task panicked"),
+            }
+            ui_result?;
         }
     }
     Ok(())
