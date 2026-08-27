@@ -266,7 +266,12 @@ impl Phase2Collector {
         initial: UiSnapshot,
     ) -> Self {
         let selection = crate::ui::live::MarketSelection::new("Binance USD-M", "BTC/USDT");
-        let state = Arc::new(Mutex::new(LiveUiState::new(publisher, initial, selection)));
+        let state = Arc::new(Mutex::new(LiveUiState::new(
+            publisher,
+            initial,
+            selection,
+            self.config.cost.clone(),
+        )));
         self.ui = Some(UiHookSink::new(state, true));
         self
     }

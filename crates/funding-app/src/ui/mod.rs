@@ -2,6 +2,7 @@ pub mod bridge;
 pub mod chart;
 pub mod live;
 pub mod model;
+pub mod opportunity;
 pub mod reducer;
 
 use iced::widget::{button, column, container, row, scrollable, text, text_input};
@@ -11,6 +12,8 @@ use bridge::UiSnapshotSubscriber;
 use live::MarketSelection;
 use model::{ControlAvailability, UiSnapshot, decimal};
 use reducer::{FundingGuiState, Message, Screen};
+
+const LIVE_EVIDENCE_FRESHNESS_MS: u64 = 2_000;
 
 pub fn run_gui(initial: UiSnapshot) -> iced::Result {
     run_gui_with_subscriber(
@@ -128,7 +131,7 @@ impl App {
                 fixed("LONG (low)", 220),
                 fixed("GAP", 110),
                 fixed("APR edge*", 130),
-                fixed("NET / $1k", 140),
+                fixed("NET / RESEARCH SIZE", 160),
                 fixed("CAPACITY", 140),
                 fixed("FRESH", 100),
             ]
@@ -152,8 +155,24 @@ impl App {
                 item.long_rate_ppm as f64 / 10_000.0,
                 item.long_interval_secs / 3600
             );
-            let exclusion = item.exclusion.as_deref().unwrap_or("eligible");
+            let stale_at_render =
+                opportunity_is_stale_at_render(item, self.state.snapshot.generated_at_us, now_us());
+            let exclusion = if stale_at_render {
+                "STALE_AT_RENDER"
+            } else {
+                item.exclusion.as_deref().unwrap_or("eligible")
+            };
             let freshness = freshness_label(item.freshness_ms, self.state.snapshot.generated_at_us);
+            let conservative_net = if stale_at_render {
+                None
+            } else {
+                item.conservative_net_usd_micros
+            };
+            let capacity = if stale_at_render {
+                None
+            } else {
+                item.capacity_usd_micros
+            };
             rows = rows.push(
                 row![
                     select,
@@ -167,11 +186,8 @@ impl App {
                         ),
                         130
                     ),
-                    fixed(
-                        decimal(item.conservative_net_usd_micros, 1_000_000, " USD"),
-                        140
-                    ),
-                    fixed(decimal(item.capacity_usd_micros, 1_000_000, " USD"), 140),
+                    fixed(decimal(conservative_net, 1_000_000, " USD"), 160),
+                    fixed(decimal(capacity, 1_000_000, " USD"), 140),
                     fixed(format!("{freshness} · {exclusion}"), 180),
                 ]
                 .spacing(8),
@@ -362,6 +378,18 @@ fn freshness_label(base_ms: u64, generated_at_us: i64) -> String {
         .map_or_else(|| "—".into(), |value| format!("{value} ms"))
 }
 
+fn opportunity_is_stale_at_render(
+    row: &model::OpportunityRow,
+    generated_at_us: i64,
+    rendered_at_us: i64,
+) -> bool {
+    if row.exclusion.is_some() {
+        return false;
+    }
+    effective_freshness_ms(row.freshness_ms, generated_at_us, rendered_at_us)
+        .is_none_or(|age_ms| age_ms > LIVE_EVIDENCE_FRESHNESS_MS)
+}
+
 fn effective_freshness_ms(base_ms: u64, generated_at_us: i64, rendered_at_us: i64) -> Option<u64> {
     if base_ms == u64::MAX {
         return None;
@@ -407,5 +435,17 @@ mod tests {
         );
         assert_eq!(effective_freshness_ms(u64::MAX, 1, 2), None);
         assert_eq!(effective_freshness_ms(125, 0, 9_000_000), Some(125));
+    }
+
+    #[test]
+    fn eligible_opportunity_is_suppressed_when_render_freshness_expires() {
+        let mut row = UiSnapshot::demo().opportunities.remove(0);
+        row.exclusion = None;
+        row.freshness_ms = 100;
+        assert!(!opportunity_is_stale_at_render(&row, 1_000_000, 2_900_000));
+        assert!(opportunity_is_stale_at_render(&row, 1_000_000, 3_000_001));
+
+        row.exclusion = Some("MISSING_FUNDING".into());
+        assert!(!opportunity_is_stale_at_render(&row, 1_000_000, 9_000_000));
     }
 }

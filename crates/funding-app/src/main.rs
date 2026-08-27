@@ -84,6 +84,7 @@ async fn main() -> Result<()> {
                 publisher,
                 initial.clone(),
                 selection.clone(),
+                config.cost.clone(),
             )));
             let shutdown = CancellationToken::new();
             let funding_collector = Phase2Collector::new(config)?.with_ui_state(ui_state.clone());

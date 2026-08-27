@@ -6,15 +6,17 @@ use std::sync::{
 use std::time::Instant;
 
 use collector::MarketEventObserver;
-use funding_core::config::ExactDecimal;
+use funding_core::config::{CostConfig, ExactDecimal};
 use funding_core::public::DerivativeEvent;
 use funding_features::{book::compute_book_features, flow::TradeWindow};
-use md_core::model::{AdapterId, BookSnapshot, NormalizedEvent};
+use md_core::model::{AdapterId, BookSnapshot, CanonicalSymbol, NormalizedEvent};
 
 use super::bridge::UiSnapshotPublisher;
 use super::model::{BookLevel, MarketDetailView, MarketSummary, OpportunityRow, UiSnapshot};
+use super::opportunity::LiveOpportunityEngine;
 
 type MarketKey = (u8, String);
+const OPPORTUNITY_EVAL_THROTTLE_US: i64 = 250_000;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 struct SelectedMarket {
@@ -133,7 +135,9 @@ pub struct LiveUiState {
     selection: MarketSelection,
     markets: BTreeMap<MarketKey, MarketState>,
     derivatives: BTreeMap<MarketKey, DerivativeMetrics>,
-    funding: BTreeMap<(String, u8), (i128, u32, u64)>,
+    opportunity_engine: LiveOpportunityEngine,
+    opportunity_rows: BTreeMap<String, OpportunityRow>,
+    last_opportunity_eval_us: BTreeMap<String, i64>,
     started: Instant,
     market_events: u64,
     derivative_events: u64,
@@ -145,6 +149,7 @@ impl LiveUiState {
         publisher: UiSnapshotPublisher,
         initial: UiSnapshot,
         selection: MarketSelection,
+        cost: CostConfig,
     ) -> Self {
         Self {
             snapshot: initial,
@@ -152,7 +157,9 @@ impl LiveUiState {
             selection,
             markets: BTreeMap::new(),
             derivatives: BTreeMap::new(),
-            funding: BTreeMap::new(),
+            opportunity_engine: LiveOpportunityEngine::new(cost),
+            opportunity_rows: BTreeMap::new(),
+            last_opportunity_eval_us: BTreeMap::new(),
             started: Instant::now(),
             market_events: 0,
             derivative_events: 0,
@@ -170,20 +177,31 @@ impl LiveUiState {
         let symbol = symbol_name(&meta.symbol.base, &meta.symbol.quote);
         let venue = venue_name(meta.adapter).to_owned();
         let key = (venue_key(meta.adapter), symbol.clone());
-        let state = self
-            .markets
-            .entry(key)
-            .or_insert_with(|| MarketState::new(venue, symbol));
-        state.last_event_ts_us = meta.local_recv_ts_us;
-        match event {
-            NormalizedEvent::Book(book) => update_book(state, book),
-            NormalizedEvent::Trade(trade) => {
-                state.trade_events = state.trade_events.saturating_add(1);
-                if state.trade_window.push(trade).is_ok() {
-                    let flow = state.trade_window.snapshot(trade.meta.local_recv_ts_us);
-                    state.detail.cvd = Some(flow.cumulative_volume_delta.scaled());
+        {
+            let state = self
+                .markets
+                .entry(key)
+                .or_insert_with(|| MarketState::new(venue, symbol));
+            state.last_event_ts_us = meta.local_recv_ts_us;
+            match event {
+                NormalizedEvent::Book(book) => update_book(state, book),
+                NormalizedEvent::Trade(trade) => {
+                    state.trade_events = state.trade_events.saturating_add(1);
+                    if state.trade_window.push(trade).is_ok() {
+                        let flow = state.trade_window.snapshot(trade.meta.local_recv_ts_us);
+                        state.detail.cvd = Some(flow.cumulative_volume_delta.scaled());
+                    }
                 }
             }
+        }
+        if matches!(event, NormalizedEvent::Book(_))
+            && matches!(
+                meta.adapter,
+                AdapterId::BinanceUsdm | AdapterId::BybitLinear
+            )
+            && meta.symbol.quote == "USDT"
+        {
+            self.refresh_opportunity(&meta.symbol, now_us(), false);
         }
         self.publish();
     }
@@ -194,18 +212,9 @@ impl LiveUiState {
         let symbol = symbol_name(&meta.symbol.base, &meta.symbol.quote);
         let key = (venue_key(meta.venue), symbol.clone());
         let metrics = self.derivatives.entry(key).or_default();
+        self.opportunity_engine.observe(event);
         match event {
-            DerivativeEvent::FundingEstimate(value) => {
-                self.funding.insert(
-                    (symbol, venue_key(meta.venue)),
-                    (
-                        value.rate,
-                        value.interval_secs,
-                        age_ms(meta.local_recv_ts_us),
-                    ),
-                );
-                self.rebuild_opportunities();
-            }
+            DerivativeEvent::FundingEstimate(_) => {}
             DerivativeEvent::MarkIndex(value) => {
                 metrics.basis_bps = value
                     .mark_price
@@ -222,46 +231,60 @@ impl LiveUiState {
             }
             _ => {}
         }
+        if meta.symbol.quote == "USDT"
+            && matches!(
+                event,
+                DerivativeEvent::FundingEstimate(_) | DerivativeEvent::MarkIndex(_)
+            )
+        {
+            self.refresh_opportunity(&meta.symbol, now_us(), true);
+        }
         self.publish();
     }
 
-    fn rebuild_opportunities(&mut self) {
-        let mut by_symbol = BTreeMap::<String, Vec<(u8, i128, u32, u64)>>::new();
-        for ((symbol, venue), (rate, interval, age)) in &self.funding {
-            by_symbol
-                .entry(symbol.clone())
-                .or_default()
-                .push((*venue, *rate, *interval, *age));
+    fn refresh_opportunity(&mut self, symbol: &CanonicalSymbol, decision_ts_us: i64, force: bool) {
+        let name = symbol_name(&symbol.base, &symbol.quote);
+        let binance_book = self
+            .markets
+            .get(&(venue_key(AdapterId::BinanceUsdm), name.clone()))
+            .and_then(|state| state.previous_book.as_ref());
+        let bybit_book = self
+            .markets
+            .get(&(venue_key(AdapterId::BybitLinear), name.clone()))
+            .and_then(|state| state.previous_book.as_ref());
+        let books_ready = binance_book.is_some() && bybit_book.is_some();
+        if !force
+            && books_ready
+            && self
+                .last_opportunity_eval_us
+                .get(&name)
+                .is_some_and(|last| {
+                    decision_ts_us.saturating_sub(*last) < OPPORTUNITY_EVAL_THROTTLE_US
+                })
+        {
+            return;
         }
-        let mut rows = Vec::new();
-        for (symbol, mut values) in by_symbol {
-            if values.len() < 2 {
-                continue;
-            }
-            values.sort_by_key(|(_, rate, _, _)| *rate);
-            let long = values.first().copied().expect("two funding values");
-            let short = values.last().copied().expect("two funding values");
-            let gap = short.1.saturating_sub(long.1);
-            let gap_ppm = gap / 1_000_000_000_000;
-            let settlements_per_year = 31_536_000_i128 / i128::from(short.2.max(long.2));
-            let apr_bps = gap_ppm.saturating_mul(settlements_per_year) / 100;
-            rows.push(OpportunityRow {
-                symbol,
-                short_venue: venue_name_from_key(short.0).into(),
-                short_rate_ppm: short.1 / 1_000_000_000_000,
-                short_interval_secs: short.2,
-                long_venue: venue_name_from_key(long.0).into(),
-                long_rate_ppm: long.1 / 1_000_000_000_000,
-                long_interval_secs: long.2,
-                raw_gap_ppm: gap_ppm,
-                indicative_apr_bps: apr_bps,
-                conservative_net_usd_micros: None,
-                capacity_usd_micros: None,
-                freshness_ms: short.3.max(long.3),
-                exclusion: Some("COST_MODEL_PENDING".into()),
-            });
+        if books_ready {
+            self.last_opportunity_eval_us
+                .insert(name.clone(), decision_ts_us);
         }
-        rows.sort_by_key(|row| std::cmp::Reverse(row.raw_gap_ppm));
+        let row =
+            self.opportunity_engine
+                .evaluate(symbol, binance_book, bybit_book, decision_ts_us);
+        self.opportunity_rows.insert(name, row);
+        let mut rows = self.opportunity_rows.values().cloned().collect::<Vec<_>>();
+        rows.sort_by(|left, right| {
+            left.exclusion
+                .is_some()
+                .cmp(&right.exclusion.is_some())
+                .then_with(|| {
+                    right
+                        .conservative_net_usd_micros
+                        .cmp(&left.conservative_net_usd_micros)
+                })
+                .then_with(|| right.raw_gap_ppm.cmp(&left.raw_gap_ppm))
+                .then_with(|| left.symbol.cmp(&right.symbol))
+        });
         self.snapshot.opportunities = rows;
     }
 
