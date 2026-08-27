@@ -32,6 +32,7 @@ impl SchemaContext {
             AdapterId::UpbitSpot => "upbit",
             AdapterId::BithumbSpot => "bithumb",
             AdapterId::BinanceSpot | AdapterId::BinanceUsdm => "binance",
+            AdapterId::BybitLinear => "bybit",
         }
     }
 
@@ -39,6 +40,7 @@ impl SchemaContext {
         match self.adapter {
             AdapterId::UpbitSpot | AdapterId::BithumbSpot | AdapterId::BinanceSpot => "spot",
             AdapterId::BinanceUsdm => "usdm_futures",
+            AdapterId::BybitLinear => "linear_futures",
         }
     }
 

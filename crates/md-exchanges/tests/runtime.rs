@@ -12,8 +12,9 @@ use md_core::model::{
     TradeTick,
 };
 use md_exchanges::{
-    AdapterRuntime, Backoff, FrameParser, GapReason, NoopRuntimeStats, ParseError, ReconnectReason,
-    RejectReason, RuntimeOptions, RuntimeStats, run_supervised_with_options,
+    AdapterRuntime, Backoff, BybitLinearParser, FrameParser, GapReason, NoopRuntimeStats,
+    ParseError, ReconnectReason, RejectReason, RuntimeOptions, RuntimeStats,
+    run_supervised_with_options,
 };
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
@@ -47,6 +48,7 @@ fn jitter_is_injected_and_cannot_exceed_the_cap() {
 #[derive(Default)]
 struct RecordingParser {
     frames: Mutex<Vec<Vec<u8>>>,
+    resets: AtomicUsize,
 }
 
 struct AlwaysErrorParser;
@@ -99,11 +101,15 @@ struct RecordingStats {
     closed_gaps: AtomicUsize,
     parse_errors: AtomicUsize,
     backpressure_disconnects: AtomicUsize,
+    delivered_trades: AtomicUsize,
 }
 
 impl RuntimeStats for RecordingStats {
     fn on_frame(&self, _adapter: AdapterId, _bytes: u32) {}
-    fn on_events(&self, _adapter: AdapterId, _books: u64, _book_rows: u64, _trades: u64) {}
+    fn on_events(&self, _adapter: AdapterId, _books: u64, _book_rows: u64, trades: u64) {
+        self.delivered_trades
+            .fetch_add(trades as usize, Ordering::SeqCst);
+    }
     fn on_parse_error(&self, _adapter: AdapterId) {
         self.parse_errors.fetch_add(1, Ordering::SeqCst);
     }
@@ -151,6 +157,10 @@ impl FrameParser for RecordingParser {
         self.frames.lock().unwrap().push(frame.to_vec());
         Ok(Vec::new())
     }
+
+    fn reset(&self) {
+        self.resets.fetch_add(1, Ordering::SeqCst);
+    }
 }
 
 #[tokio::test]
@@ -183,12 +193,13 @@ async fn reconnect_resends_subscription_and_replies_to_ping() {
     });
 
     let shutdown = CancellationToken::new();
+    let parser = Arc::new(RecordingParser::default());
     let runtime = AdapterRuntime::new(
         AdapterId::UpbitSpot,
         format!("ws://{address}"),
         r#"[{"ticket":"test"}]"#,
         Duration::from_secs(60),
-        Arc::new(RecordingParser::default()),
+        parser.clone(),
     );
     let (tx, _rx) = mpsc::channel(4);
     let options = fast_options();
@@ -215,10 +226,118 @@ async fn reconnect_resends_subscription_and_replies_to_ping() {
     task.await.unwrap().unwrap();
     server.await.unwrap();
 
+    assert_eq!(parser.resets.load(Ordering::SeqCst), 2);
+
     assert_eq!(
         subscriptions.lock().unwrap().as_slice(),
         &[r#"[{"ticket":"test"}]"#, r#"[{"ticket":"test"}]"#]
     );
+}
+
+struct ReconnectRequiredParser;
+
+impl FrameParser for ReconnectRequiredParser {
+    fn parse(&self, _frame: &mut [u8], _recv_us: i64) -> Result<Vec<NormalizedEvent>, ParseError> {
+        Err(ParseError::SnapshotRequired)
+    }
+}
+
+#[tokio::test]
+async fn sequence_state_error_forces_reconnect_after_one_frame() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut websocket = accept_async(stream).await.unwrap();
+        websocket.next().await.unwrap().unwrap();
+        websocket.send(Message::Text("delta".into())).await.unwrap();
+        while websocket.next().await.is_some() {}
+    });
+    let stats = Arc::new(RecordingStats::default());
+    let shutdown = CancellationToken::new();
+    let (tx, _rx) = mpsc::channel(1);
+    let task = tokio::spawn(run_supervised_with_options(
+        AdapterRuntime::new(
+            AdapterId::BybitLinear,
+            format!("ws://{address}"),
+            "subscription",
+            Duration::from_secs(60),
+            Arc::new(ReconnectRequiredParser),
+        ),
+        tx,
+        shutdown.clone(),
+        stats.clone(),
+        fast_options(),
+    ));
+    wait_until(|| {
+        stats
+            .reconnects
+            .lock()
+            .unwrap()
+            .contains(&ReconnectReason::Protocol)
+    })
+    .await;
+    assert_eq!(stats.parse_errors.load(Ordering::SeqCst), 1);
+    shutdown.cancel();
+    task.await.unwrap().unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn bybit_success_ack_is_not_rejected_and_failure_reconnects_immediately() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut websocket = accept_async(stream).await.unwrap();
+        websocket.next().await.unwrap().unwrap();
+        websocket
+            .send(Message::Text(
+                r#"{"success":true,"ret_msg":"","op":"subscribe","conn_id":"conn"}"#.into(),
+            ))
+            .await
+            .unwrap();
+        websocket
+            .send(Message::Text(
+                r#"{"success":false,"ret_msg":"invalid topic","op":"subscribe","conn_id":"conn"}"#
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        while websocket.next().await.is_some() {}
+    });
+    let stats = Arc::new(RecordingStats::default());
+    let shutdown = CancellationToken::new();
+    let (tx, _rx) = mpsc::channel(1);
+    let task = tokio::spawn(run_supervised_with_options(
+        AdapterRuntime::new(
+            AdapterId::BybitLinear,
+            format!("ws://{address}"),
+            "subscription",
+            Duration::from_secs(60),
+            Arc::new(BybitLinearParser::new(CanonicalSymbol::new("BTC", "USDT"))),
+        ),
+        tx,
+        shutdown.clone(),
+        stats.clone(),
+        fast_options(),
+    ));
+    wait_until(|| {
+        stats
+            .reconnects
+            .lock()
+            .unwrap()
+            .contains(&ReconnectReason::Protocol)
+    })
+    .await;
+    assert_eq!(stats.parse_errors.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        stats.rejects.lock().unwrap().as_slice(),
+        &[RejectReason::Parse]
+    );
+    shutdown.cancel();
+    task.await.unwrap().unwrap();
+    server.await.unwrap();
 }
 
 #[tokio::test]
@@ -397,6 +516,7 @@ async fn bounded_event_send_reports_backpressure_without_waiting_five_seconds() 
             .unwrap()
             .contains(&GapReason::Backpressure)
     );
+    assert_eq!(stats.delivered_trades.load(Ordering::SeqCst), 1);
     shutdown.cancel();
     task.await.unwrap().unwrap();
     server.await.unwrap();

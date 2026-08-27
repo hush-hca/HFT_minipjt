@@ -141,3 +141,17 @@ print(trade_time.slice(0, 5))
 ```
 
 Some source timestamps are nullable. Filter null values before latency calculations, and use `event_ts_precision`/`trade_ts_precision` so millisecond observations are not treated as genuinely microsecond-precise. Use `event_id` plus `side` and `level` to reconstruct a snapshot; do not treat each book row as an independent source event.
+
+## Phase 2A derivatives streams
+
+Phase 2A adds seven event-family streams under:
+
+```text
+{output_root}/derivatives/{event_family}/{venue}/{market}/{BASE}-{QUOTE}/{YYYY-MM-DD}/{HH}/{event_family}.arrow
+```
+
+The UTC hour uses a valid source-event timestamp and falls back to local receive time only when the source timestamp is unavailable. Families are `instrument`, `mark_index`, `funding_estimate`, `funding_settlement`, `open_interest`, `trader_ratio`, and `quote_conversion`. Venue/market pairs include `binance/usdm_futures`, `bybit/linear_futures`, and the `upbit/spot` or `bithumb/spot` source of a conversion quote.
+
+Every derivative schema begins with `schema_version`, UUIDv7 `event_id`, `venue`, `market`, `base`, `quote`, `source_symbol`, nullable `exchange_event_ts_us`, `local_recv_ts_us`, and `source_precision`. Financial columns are exact `Decimal128(38,18)`. Funding rows explicitly distinguish `indicative_next` from `settled_actual`, carry `mark_notional` basis, interval seconds and provenance, and the next-funding or settlement timestamp. Trader rows retain their metric kind; Binance top-account/top-position ratios are not collected in Phase 2A because their current official endpoints require an API key, while Bybit public rows use `bybit_long_short_ratio`. Quote conversion emits separate executable best-bid and best-ask rows with available quantity and rejects stale or incomplete books.
+
+A successful `phase2a-report.json` is written only after both market and derivative channels are drained, Arrow streams are finalized, and recursive validation succeeds. On startup, producer, storage, or validation failure the collector still attempts to drain/finalize and may publish a failure report with nonempty aggregated `health_errors`; such a report does not certify the dataset. Report publication syncs a temporary file and atomically replaces the destination without first moving it away; Unix also syncs the parent directory, while Windows uses the native replace/move APIs. Reports are operational metadata rather than Arrow streams and never contain credentials. `sequence_gaps` is limited to sequence/snapshot continuity failures and excludes timestamp regressions.

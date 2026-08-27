@@ -1,0 +1,48 @@
+output_root = "data/funding"
+assets = [
+  "BTC", "ETH", "XRP", "SOL", "DOGE", "ADA", "AVAX", "LINK", "DOT", "BCH",
+  "LTC", "ETC", "TRX", "XLM", "ATOM", "NEAR", "APT", "SUI", "ARB", "OP",
+]
+channel_capacity = 8192
+batch_rows = 4096
+flush_interval_ms = 1000
+
+[cost]
+binance_taker_rate = "0.0004"
+bybit_taker_rate = "0.00055"
+entry_slippage_bps = "2"
+exit_slippage_bps = "10"
+entry_book_impact_bps = "2"
+exit_book_impact_bps = "3"
+basis_risk_buffer_bps = "5"
+funding_error_buffer_bps = "3"
+leg_risk_buffer_bps = "2"
+research_quote_per_leg = "100"
+
+[[quote_conversions]]
+base = "USDT"
+quote = "KRW"
+venues = ["upbit_spot", "bithumb_spot"]
+
+[poll]
+instrument_secs = 900
+open_interest_secs = 5
+trader_ratio_secs = 300
+funding_metadata_secs = 900
+reserved_order_weight = 200
+
+[venues.binance_usdm.mainnet]
+rest_url = "https://fapi.binance.com"
+public_websocket_url = "wss://fstream.binance.com/ws"
+
+[venues.binance_usdm.testnet]
+rest_url = "https://demo-fapi.binance.com"
+public_websocket_url = "wss://fstream.binancefuture.com/ws"
+
+[venues.bybit_linear.mainnet]
+rest_url = "https://api.bybit.com"
+public_websocket_url = "wss://stream.bybit.com/v5/public/linear"
+
+[venues.bybit_linear.testnet]
+rest_url = "https://api-testnet.bybit.com"
+public_websocket_url = "wss://stream-testnet.bybit.com/v5/public/linear"

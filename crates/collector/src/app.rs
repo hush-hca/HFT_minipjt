@@ -51,6 +51,14 @@ pub trait SnapshotEmitter: Send + Sync {
     fn emit(&self, snapshot: &AdapterSnapshot);
 }
 
+/// Receives normalized market events on the storage consumer task.
+///
+/// Implementations must return immediately: collection and Arrow persistence
+/// intentionally never await a UI or analytics consumer.
+pub trait MarketEventObserver: Send + Sync {
+    fn observe(&self, event: &NormalizedEvent);
+}
+
 #[derive(Default)]
 struct LiveDiscovery;
 
@@ -103,11 +111,19 @@ impl SnapshotEmitter for TracingSnapshotEmitter {
     }
 }
 
+#[derive(Default)]
+struct NoopMarketEventObserver;
+
+impl MarketEventObserver for NoopMarketEventObserver {
+    fn observe(&self, _event: &NormalizedEvent) {}
+}
+
 pub struct CollectorApp {
     config: CollectorConfig,
     discovery: Arc<dyn MarketDiscovery>,
     supervisor: Arc<dyn AdapterSupervisor>,
     emitter: Arc<dyn SnapshotEmitter>,
+    event_observer: Arc<dyn MarketEventObserver>,
     stats: Arc<StatsRegistry>,
 }
 
@@ -143,8 +159,14 @@ impl CollectorApp {
             discovery,
             supervisor,
             emitter,
+            event_observer: Arc::new(NoopMarketEventObserver),
             stats,
         })
+    }
+
+    pub fn with_event_observer(mut self, observer: Arc<dyn MarketEventObserver>) -> Self {
+        self.event_observer = observer;
+        self
     }
 
     pub fn stats(&self) -> Arc<StatsRegistry> {
@@ -170,6 +192,7 @@ impl CollectorApp {
             rx,
             Duration::from_millis(self.config.flush_interval_ms),
             Arc::clone(&self.stats),
+            Arc::clone(&self.event_observer),
         ));
         let stats_shutdown = CancellationToken::new();
         let stats_task = spawn_stats_task(
@@ -313,12 +336,22 @@ impl CollectorApp {
                         .to_string(),
                     String::new(),
                 ),
+                AdapterId::BybitLinear => {
+                    return Err(anyhow!(
+                        "adapter BybitLinear is not supported by the Phase 1 collector runtime"
+                    ));
+                }
             };
             let parser: Arc<dyn FrameParser> = match adapter {
                 AdapterId::UpbitSpot => Arc::new(UpbitParser),
                 AdapterId::BithumbSpot => Arc::new(BithumbParser),
                 AdapterId::BinanceSpot => Arc::new(BinanceSpotParser),
                 AdapterId::BinanceUsdm => Arc::new(BinanceUsdmParser),
+                AdapterId::BybitLinear => {
+                    return Err(anyhow!(
+                        "adapter BybitLinear is not supported by the Phase 1 collector runtime"
+                    ));
+                }
             };
             let proactive = config
                 .proactive_reconnect_secs
@@ -354,6 +387,7 @@ async fn storage_loop(
     mut receiver: mpsc::Receiver<NormalizedEvent>,
     flush_interval: Duration,
     stats: Arc<StatsRegistry>,
+    event_observer: Arc<dyn MarketEventObserver>,
 ) -> Result<()> {
     let mut flush = tokio::time::interval(flush_interval);
     flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -395,6 +429,7 @@ async fn storage_loop(
                             1,
                         ),
                     };
+                    event_observer.observe(&event);
                     if let Err(error) = router.push(event).await {
                         let _ = router.shutdown().await;
                         return Err(anyhow!(error)).with_context(|| {

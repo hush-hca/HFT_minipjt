@@ -1,0 +1,26 @@
+[package]
+name = "execution"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+million-order-soak = []
+
+[dependencies]
+funding-core = { path = "../funding-core" }
+md-core = { path = "../md-core" }
+ring = "0.17"
+rusqlite = { git = "https://github.com/rusqlite/rusqlite.git", tag = "v0.32.1", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3"
+
+[[test]]
+name = "million_order"
+path = "tests/million_order.rs"
+required-features = ["million-order-soak"]

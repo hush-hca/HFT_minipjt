@@ -1,0 +1,66 @@
+name: Cross-platform Rust CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - "codex/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test-gui:
+    name: ${{ matrix.os }} · Rust stable
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - windows-latest
+          - macos-latest
+          - ubuntu-latest
+
+    env:
+      CARGO_TERM_COLOR: always
+      RUSTUP_TOOLCHAIN: stable
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install stable Rust components
+        run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
+
+      - name: Install Linux GUI build dependencies
+        if: runner.os == 'Linux'
+        run: >-
+          sudo apt-get update && sudo apt-get install --yes
+          pkg-config
+          libasound2-dev
+          libudev-dev
+          libwayland-dev
+          libxkbcommon-dev
+
+      - name: Fetch locked dependencies
+        run: cargo fetch --locked
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run strict Clippy
+        run: cargo clippy --workspace --all-targets --all-features --locked --offline -- -D warnings
+
+      - name: Run workspace tests
+        run: cargo test --workspace --all-features --locked --offline
+
+      - name: Build release GUI
+        run: cargo build -p funding-app --release --features gui --locked --offline

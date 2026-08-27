@@ -1,0 +1,17 @@
+[package]
+name = "funding-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+md-core = { path = "../md-core" }
+num-bigint = "0.4"
+num-traits = "0.2"
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+toml = "1"
+url = "2"
+uuid = { version = "1", features = ["serde", "v7"] }

@@ -1,0 +1,16 @@
+[
+  {
+    "symbol": "BTCUSDT",
+    "fundingRate": "0.000090000000000001",
+    "fundingTime": 1719993600000,
+    "markPrice": "59800.0",
+    "rateType": "Regular"
+  },
+  {
+    "symbol": "BTCUSDT",
+    "fundingRate": "0.000100000000000001",
+    "fundingTime": 1720022400000,
+    "markPrice": "60100.0",
+    "rateType": "Regular"
+  }
+]

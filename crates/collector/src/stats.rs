@@ -152,7 +152,7 @@ struct GapState {
 #[derive(Clone)]
 pub struct StatsRegistry {
     queue_capacity: usize,
-    adapters: Arc<[AdapterStats; 4]>,
+    adapters: Arc<[AdapterStats; 5]>,
     clock: Arc<dyn Fn() -> i64 + Send + Sync>,
 }
 
@@ -400,6 +400,7 @@ pub fn adapter_name(adapter: AdapterId) -> &'static str {
         AdapterId::BithumbSpot => "bithumb_spot",
         AdapterId::BinanceSpot => "binance_spot",
         AdapterId::BinanceUsdm => "binance_usdm",
+        AdapterId::BybitLinear => "bybit_linear",
     }
 }
 
@@ -409,6 +410,7 @@ fn adapter_index(adapter: AdapterId) -> usize {
         AdapterId::BithumbSpot => 1,
         AdapterId::BinanceSpot => 2,
         AdapterId::BinanceUsdm => 3,
+        AdapterId::BybitLinear => 4,
     }
 }
 

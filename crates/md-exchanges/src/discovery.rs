@@ -18,6 +18,8 @@ pub struct DiscoveryResult {
 
 #[derive(Debug, Error)]
 pub enum DiscoveryError {
+    #[error("adapter {adapter:?} is not supported by the Phase 1 discovery path")]
+    UnsupportedAdapter { adapter: AdapterId },
     #[error("adapter {adapter:?} is missing configuration key {key:?}")]
     MissingAdapterConfig {
         adapter: AdapterId,
@@ -48,6 +50,8 @@ pub enum DiscoveryError {
 
 #[derive(Debug, Error)]
 pub enum SubscriptionError {
+    #[error("adapter {adapter:?} is not supported by the Phase 1 subscription path")]
+    UnsupportedAdapter { adapter: AdapterId },
     #[error("at least one market pair is required")]
     EmptyPairs,
     #[error(
@@ -133,6 +137,7 @@ pub fn discovery_from_payload(
         AdapterId::BithumbSpot => crate::bithumb::parse_active_markets(payload)?,
         AdapterId::BinanceSpot => crate::binance_spot::parse_active_markets(payload)?,
         AdapterId::BinanceUsdm => crate::binance_usdm::parse_active_markets(payload)?,
+        AdapterId::BybitLinear => return Err(DiscoveryError::UnsupportedAdapter { adapter }),
     };
     ordered_intersection(adapter, cfg, &active)
 }
@@ -147,6 +152,7 @@ pub fn build_subscription(
         AdapterId::BithumbSpot => crate::bithumb::build_subscription(pairs, ticket),
         AdapterId::BinanceSpot => crate::binance_spot::build_subscription(pairs),
         AdapterId::BinanceUsdm => crate::binance_usdm::build_subscription(pairs),
+        AdapterId::BybitLinear => Err(SubscriptionError::UnsupportedAdapter { adapter }),
     }
 }
 
@@ -340,6 +346,7 @@ fn adapter_config(
         AdapterId::BithumbSpot => "bithumb_spot",
         AdapterId::BinanceSpot => "binance_spot",
         AdapterId::BinanceUsdm => "binance_usdm",
+        AdapterId::BybitLinear => return Err(DiscoveryError::UnsupportedAdapter { adapter }),
     };
     cfg.adapters
         .get(key)

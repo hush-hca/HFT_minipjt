@@ -5,7 +5,8 @@ use md_core::{
     model::{AdapterId, CanonicalSymbol},
 };
 use md_exchanges::{
-    DiscoveryError, build_combined_stream_url, build_subscription, discovery_from_payload,
+    DiscoveryError, SubscriptionError, build_combined_stream_url, build_subscription,
+    discovery_from_payload,
 };
 use uuid::Uuid;
 
@@ -309,4 +310,25 @@ fn subscriptions_reject_empty_or_unsafe_symbols_and_invalid_base_urls() {
     assert!(
         build_combined_stream_url("not a URL", &[CanonicalSymbol::new("BTC", "USDT")],).is_err()
     );
+}
+
+#[test]
+fn phase_one_discovery_and_subscription_reject_bybit_explicitly() {
+    let mut payload = br#"{}"#.to_vec();
+    assert!(matches!(
+        discovery_from_payload(AdapterId::BybitLinear, &config(false), &mut payload),
+        Err(DiscoveryError::UnsupportedAdapter {
+            adapter: AdapterId::BybitLinear
+        })
+    ));
+    assert!(matches!(
+        build_subscription(
+            AdapterId::BybitLinear,
+            &[CanonicalSymbol::new("BTC", "USDT")],
+            Uuid::nil()
+        ),
+        Err(SubscriptionError::UnsupportedAdapter {
+            adapter: AdapterId::BybitLinear
+        })
+    ));
 }

@@ -112,6 +112,16 @@ fn partition_path_is_utc_and_event_specific() {
 }
 
 #[test]
+fn bybit_linear_uses_its_own_storage_namespace() {
+    let key =
+        PartitionKey::from_parts(AdapterId::BybitLinear, "BTC", "USDT", HOUR_02_START).unwrap();
+    assert_eq!(
+        key.book_path(Path::new("data")),
+        Path::new("data/bybit/linear_futures/BTC-USDT/2024-09-10/01/books.arrow.partial")
+    );
+}
+
+#[test]
 fn unsafe_symbols_are_rejected_before_forming_paths() {
     for bad in ["", "../BTC", "BTC/USD", "BT C", "ÉTH", "btc"] {
         assert!(
@@ -216,6 +226,72 @@ async fn existing_readable_final_is_merged_instead_of_overwritten() {
     let key = PartitionKey::for_event(&trade(HOUR_02_START, "unused")).unwrap();
     let final_path = key.trade_path(temp.path()).with_file_name("trades.arrow");
     assert_eq!(count_rows(&final_path), 2);
+}
+
+#[tokio::test]
+async fn reopen_does_not_replay_partial_proven_consumed_by_merge_witness() {
+    let temp = TestDir::new();
+    for id in ["one", "two"] {
+        let mut router =
+            PartitionRouter::open(config(temp.path(), 1, Duration::from_secs(1))).unwrap();
+        router.push(trade(HOUR_02_START, id)).await.unwrap();
+        router.shutdown().await.unwrap();
+    }
+
+    let key = PartitionKey::for_event(&trade(HOUR_02_START, "unused")).unwrap();
+    let partial = key.trade_path(temp.path());
+    let final_path = partial.with_file_name("trades.arrow");
+    fs::write(&partial, b"already consumed before interruption").unwrap();
+    let witness = final_path.with_file_name("trades.arrow.merge-witness.interrupted.candidate");
+    let source = final_path.with_file_name("trades.arrow.merge-witness.interrupted.source");
+    fs::copy(&final_path, &witness).unwrap();
+    fs::copy(&partial, &source).unwrap();
+
+    let mut resumed =
+        PartitionRouter::open(config(temp.path(), 1, Duration::from_secs(1))).unwrap();
+    resumed.push(trade(HOUR_02_START, "three")).await.unwrap();
+    resumed.shutdown().await.unwrap();
+
+    assert_eq!(count_rows(&final_path), 3);
+    assert!(!partial.exists());
+    assert!(!witness.exists());
+    assert!(!source.exists());
+}
+
+#[tokio::test]
+async fn stale_witness_never_consumes_a_new_unrelated_partial() {
+    let temp = TestDir::new();
+    for id in ["one", "two"] {
+        let mut router =
+            PartitionRouter::open(config(temp.path(), 1, Duration::from_secs(1))).unwrap();
+        router.push(trade(HOUR_02_START, id)).await.unwrap();
+        router.shutdown().await.unwrap();
+    }
+    let key = PartitionKey::for_event(&trade(HOUR_02_START, "unused")).unwrap();
+    let partial = key.trade_path(temp.path());
+    let final_path = partial.with_file_name("trades.arrow");
+
+    let mut interrupted =
+        PartitionRouter::open(config(temp.path(), 1, Duration::from_secs(60))).unwrap();
+    interrupted
+        .push(trade(HOUR_02_START, "three"))
+        .await
+        .unwrap();
+    drop(interrupted);
+
+    let witness = final_path.with_file_name("trades.arrow.merge-witness.stale.candidate");
+    let source = final_path.with_file_name("trades.arrow.merge-witness.stale.source");
+    fs::copy(&final_path, &witness).unwrap();
+    fs::write(&source, b"different previously consumed partial").unwrap();
+
+    let mut resumed =
+        PartitionRouter::open(config(temp.path(), 1, Duration::from_secs(1))).unwrap();
+    resumed.push(trade(HOUR_02_START, "four")).await.unwrap();
+    resumed.shutdown().await.unwrap();
+
+    assert_eq!(count_rows(&final_path), 4);
+    assert!(!witness.exists());
+    assert!(!source.exists());
 }
 
 #[tokio::test]

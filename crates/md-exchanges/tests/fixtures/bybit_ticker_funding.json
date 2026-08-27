@@ -1,0 +1,15 @@
+{
+  "topic": "tickers.BTCUSDT",
+  "type": "snapshot",
+  "ts": 1720000000123,
+  "cs": 100,
+  "data": {
+    "symbol": "BTCUSDT",
+    "markPrice": "60000.123456789012345678",
+    "indexPrice": "59999.987654321098765432",
+    "fundingRate": "0.000110000000000001",
+    "nextFundingTime": "1720000800000",
+    "fundingIntervalHour": "8",
+    "fundingCap": "0.005"
+  }
+}

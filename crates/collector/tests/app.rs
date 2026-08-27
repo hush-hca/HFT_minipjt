@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use collector::{
     AdapterSnapshot, AdapterSupervisor, CollectorApp, DiscoveryFuture, GapRecord, MarketDiscovery,
-    RunReport, SnapshotEmitter, StatsRegistry, SupervisorFuture,
+    MarketEventObserver, RunReport, SnapshotEmitter, StatsRegistry, SupervisorFuture,
 };
 use md_core::config::{AdapterConfig, CollectorConfig, RetryConfig};
 use md_core::model::{
@@ -58,6 +58,20 @@ fn statistics_snapshot_contains_all_health_signals() {
     assert!(snapshot.receive_lag_us.p50 >= 40);
     assert!(snapshot.receive_lag_us.p95 >= 90);
     assert!(snapshot.receive_lag_us.p99 >= 90);
+}
+
+#[test]
+fn statistics_registry_accepts_bybit_without_widening_phase_one_snapshots() {
+    let stats = StatsRegistry::new(16);
+    stats.on_frame(AdapterId::BybitLinear, 64);
+    assert_eq!(stats.snapshot(AdapterId::BybitLinear).frames, 1);
+    assert_eq!(stats.snapshots().len(), 4);
+    assert!(
+        stats
+            .snapshots()
+            .iter()
+            .all(|snapshot| snapshot.adapter != "bybit_linear")
+    );
 }
 
 #[test]
@@ -175,6 +189,32 @@ async fn graceful_shutdown_drains_storage_then_writes_final_report() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+#[tokio::test]
+async fn stored_events_are_forwarded_to_the_optional_observer() {
+    let root = unique_root("event-observer");
+    let supervisor = Arc::new(FakeSupervisor::with_event(book_event()));
+    let observer = Arc::new(RecordingObserver::default());
+    let app = CollectorApp::with_services(
+        config(root.clone(), false, 10),
+        Arc::new(FakeDiscovery::all_available()),
+        supervisor.clone(),
+        Arc::new(RecordingEmitter::default()),
+    )
+    .unwrap()
+    .with_event_observer(observer.clone());
+    let shutdown = CancellationToken::new();
+    let running = tokio::spawn(app.run(shutdown.clone()));
+    supervisor.started.notified().await;
+    shutdown.cancel();
+
+    running.await.unwrap().unwrap();
+
+    let events = observer.events.lock().unwrap();
+    assert_eq!(events.len(), 1);
+    assert!(matches!(events[0], NormalizedEvent::Book(_)));
+    let _ = std::fs::remove_dir_all(root);
+}
+
 #[tokio::test(start_paused = true)]
 async fn configured_interval_emits_rates_and_a_final_snapshot() {
     let root = unique_root("interval");
@@ -230,6 +270,48 @@ async fn strict_discovery_failure_happens_before_storage_is_opened() {
 
     assert!(format!("{error:#}").contains("strict market discovery failed"));
     assert!(!root.exists());
+}
+
+#[tokio::test]
+async fn phase_one_collect_launches_only_the_original_four_adapters() {
+    let root = unique_root("phase-one-adapter-boundary");
+    let mut cfg = config(root.clone(), false, 10);
+    for adapter in cfg.adapters.values_mut() {
+        adapter.enabled = true;
+    }
+    let supervisor = Arc::new(CountingSupervisor::default());
+    let app = CollectorApp::with_services(
+        cfg,
+        Arc::new(FakeDiscovery::all_available()),
+        supervisor.clone(),
+        Arc::new(RecordingEmitter::default()),
+    )
+    .unwrap();
+    let shutdown = CancellationToken::new();
+    let running = tokio::spawn(app.run(shutdown.clone()));
+
+    supervisor.all_started.notified().await;
+    shutdown.cancel();
+    running.await.unwrap().unwrap();
+
+    let mut launched = supervisor.launched.lock().unwrap().clone();
+    launched.sort_by_key(|adapter| match adapter {
+        AdapterId::UpbitSpot => 0,
+        AdapterId::BithumbSpot => 1,
+        AdapterId::BinanceSpot => 2,
+        AdapterId::BinanceUsdm => 3,
+        AdapterId::BybitLinear => 4,
+    });
+    assert_eq!(
+        launched,
+        vec![
+            AdapterId::UpbitSpot,
+            AdapterId::BithumbSpot,
+            AdapterId::BinanceSpot,
+            AdapterId::BinanceUsdm,
+        ]
+    );
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[derive(Clone)]
@@ -298,6 +380,38 @@ struct FakeSupervisor {
     cancelled: Arc<AtomicBool>,
 }
 
+#[derive(Default)]
+struct CountingSupervisor {
+    launched: Arc<Mutex<Vec<AdapterId>>>,
+    all_started: Arc<Notify>,
+}
+
+impl AdapterSupervisor for CountingSupervisor {
+    fn run(
+        &self,
+        runtime: AdapterRuntime,
+        _options: RuntimeOptions,
+        _tx: mpsc::Sender<NormalizedEvent>,
+        shutdown: CancellationToken,
+        _stats: Arc<dyn RuntimeStats>,
+    ) -> SupervisorFuture {
+        let launched = Arc::clone(&self.launched);
+        let all_started = Arc::clone(&self.all_started);
+        Box::pin(async move {
+            let count = {
+                let mut launched = launched.lock().unwrap();
+                launched.push(runtime.id);
+                launched.len()
+            };
+            if count == 4 {
+                all_started.notify_one();
+            }
+            shutdown.cancelled().await;
+            Ok(())
+        })
+    }
+}
+
 impl FakeSupervisor {
     fn with_event(event: NormalizedEvent) -> Self {
         Self {
@@ -350,6 +464,17 @@ struct RecordingEmitter {
 impl SnapshotEmitter for RecordingEmitter {
     fn emit(&self, snapshot: &AdapterSnapshot) {
         self.records.lock().unwrap().push(snapshot.clone());
+    }
+}
+
+#[derive(Default)]
+struct RecordingObserver {
+    events: Mutex<Vec<NormalizedEvent>>,
+}
+
+impl MarketEventObserver for RecordingObserver {
+    fn observe(&self, event: &NormalizedEvent) {
+        self.events.lock().unwrap().push(event.clone());
     }
 }
 
