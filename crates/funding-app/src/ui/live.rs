@@ -18,6 +18,20 @@ use super::opportunity::LiveOpportunityEngine;
 type MarketKey = (u8, String);
 const OPPORTUNITY_EVAL_THROTTLE_US: i64 = 250_000;
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum DataPlane {
+    CoreMarket,
+    Funding,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum DataPlaneStatus {
+    Starting,
+    Receiving,
+    Stopped,
+    Failed,
+}
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 struct SelectedMarket {
     venue: String,
@@ -138,6 +152,8 @@ pub struct LiveUiState {
     opportunity_engine: LiveOpportunityEngine,
     opportunity_rows: BTreeMap<String, OpportunityRow>,
     last_opportunity_eval_us: BTreeMap<String, i64>,
+    core_market_status: DataPlaneStatus,
+    funding_status: DataPlaneStatus,
     started: Instant,
     market_events: u64,
     derivative_events: u64,
@@ -160,6 +176,8 @@ impl LiveUiState {
             opportunity_engine: LiveOpportunityEngine::new(cost),
             opportunity_rows: BTreeMap::new(),
             last_opportunity_eval_us: BTreeMap::new(),
+            core_market_status: DataPlaneStatus::Starting,
+            funding_status: DataPlaneStatus::Starting,
             started: Instant::now(),
             market_events: 0,
             derivative_events: 0,
@@ -172,6 +190,15 @@ impl LiveUiState {
     }
 
     pub fn market(&mut self, event: &NormalizedEvent) {
+        self.market_from(DataPlane::CoreMarket, event);
+    }
+
+    pub fn funding_market(&mut self, event: &NormalizedEvent) {
+        self.market_from(DataPlane::Funding, event);
+    }
+
+    fn market_from(&mut self, plane: DataPlane, event: &NormalizedEvent) {
+        self.set_status_without_publish(plane, DataPlaneStatus::Receiving);
         self.market_events = self.market_events.saturating_add(1);
         let meta = event.meta();
         let symbol = symbol_name(&meta.symbol.base, &meta.symbol.quote);
@@ -207,6 +234,7 @@ impl LiveUiState {
     }
 
     pub fn derivative(&mut self, event: &DerivativeEvent) {
+        self.set_status_without_publish(DataPlane::Funding, DataPlaneStatus::Receiving);
         self.derivative_events = self.derivative_events.saturating_add(1);
         let meta = event.meta();
         let symbol = symbol_name(&meta.symbol.base, &meta.symbol.quote);
@@ -242,6 +270,29 @@ impl LiveUiState {
         self.publish();
     }
 
+    pub fn set_data_plane_status(&mut self, plane: DataPlane, status: DataPlaneStatus) {
+        self.set_status_without_publish(plane, status);
+        if self.data_plane_failed() {
+            for row in self.opportunity_rows.values_mut() {
+                invalidate_for_data_plane_failure(row);
+            }
+            self.snapshot.opportunities = self.opportunity_rows.values().cloned().collect();
+        }
+        self.publish();
+    }
+
+    fn set_status_without_publish(&mut self, plane: DataPlane, status: DataPlaneStatus) {
+        match plane {
+            DataPlane::CoreMarket => self.core_market_status = status,
+            DataPlane::Funding => self.funding_status = status,
+        }
+    }
+
+    fn data_plane_failed(&self) -> bool {
+        self.core_market_status == DataPlaneStatus::Failed
+            || self.funding_status == DataPlaneStatus::Failed
+    }
+
     fn refresh_opportunity(&mut self, symbol: &CanonicalSymbol, decision_ts_us: i64, force: bool) {
         let name = symbol_name(&symbol.base, &symbol.quote);
         let binance_book = self
@@ -268,9 +319,12 @@ impl LiveUiState {
             self.last_opportunity_eval_us
                 .insert(name.clone(), decision_ts_us);
         }
-        let row =
+        let mut row =
             self.opportunity_engine
                 .evaluate(symbol, binance_book, bybit_book, decision_ts_us);
+        if self.data_plane_failed() {
+            invalidate_for_data_plane_failure(&mut row);
+        }
         self.opportunity_rows.insert(name, row);
         let mut rows = self.opportunity_rows.values().cloned().collect::<Vec<_>>();
         rows.sort_by(|left, right| {
@@ -297,8 +351,10 @@ impl LiveUiState {
         self.snapshot.health.events_per_second =
             self.market_events.saturating_add(self.derivative_events) / elapsed;
         self.snapshot.health.features_per_second = self.derivative_events / elapsed;
-        self.snapshot.health.public_connections = "RECEIVING".into();
-        self.snapshot.health.arrow_status = "WRITING".into();
+        self.snapshot.health.public_connections =
+            aggregate_connection_status(self.core_market_status, self.funding_status).into();
+        self.snapshot.health.arrow_status =
+            aggregate_arrow_status(self.core_market_status, self.funding_status).into();
         self.snapshot.health.ui_input_drops = self.input_drops.load(Ordering::Relaxed);
         self.snapshot.health.ui_snapshots_superseded = self.publisher.superseded_count();
         self.publisher.publish(self.snapshot.clone());
@@ -405,6 +461,38 @@ fn append_point(points: &mut Vec<(i64, i128)>, timestamp: i64, value: i128) {
     }
     if points.len() > 3_600 {
         points.drain(..points.len() - 3_600);
+    }
+}
+
+fn invalidate_for_data_plane_failure(row: &mut OpportunityRow) {
+    row.conservative_net_usd_micros = None;
+    row.capacity_usd_micros = None;
+    row.exclusion = Some("DATA_PLANE_FAILED".into());
+}
+
+fn aggregate_connection_status(core: DataPlaneStatus, funding: DataPlaneStatus) -> &'static str {
+    aggregate_status(core, funding, "RECEIVING")
+}
+
+fn aggregate_arrow_status(core: DataPlaneStatus, funding: DataPlaneStatus) -> &'static str {
+    aggregate_status(core, funding, "WRITING")
+}
+
+fn aggregate_status(
+    core: DataPlaneStatus,
+    funding: DataPlaneStatus,
+    healthy: &'static str,
+) -> &'static str {
+    if core == DataPlaneStatus::Failed || funding == DataPlaneStatus::Failed {
+        "FAILED"
+    } else if core == DataPlaneStatus::Stopped && funding == DataPlaneStatus::Stopped {
+        "STOPPED"
+    } else if core == DataPlaneStatus::Receiving && funding == DataPlaneStatus::Receiving {
+        healthy
+    } else if core == DataPlaneStatus::Starting && funding == DataPlaneStatus::Starting {
+        "STARTING"
+    } else {
+        "PARTIAL"
     }
 }
 

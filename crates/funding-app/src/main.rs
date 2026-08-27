@@ -1,3 +1,5 @@
+#[cfg(feature = "gui")]
+use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 #[cfg(feature = "gui")]
 use std::sync::{Arc, Mutex};
@@ -9,6 +11,8 @@ use clap::{Parser, Subcommand};
 use collector::CollectorApp;
 use funding_app::Phase2Collector;
 use funding_core::config::FundingConfig;
+#[cfg(feature = "gui")]
+use futures_util::FutureExt;
 #[cfg(feature = "gui")]
 use md_core::config::CollectorConfig;
 use tokio_util::sync::CancellationToken;
@@ -87,16 +91,40 @@ async fn main() -> Result<()> {
                 config.cost.clone(),
             )));
             let shutdown = CancellationToken::new();
+            let funding_status_state = ui_state.clone();
+            let market_status_state = ui_state.clone();
             let funding_collector = Phase2Collector::new(config)?.with_ui_state(ui_state.clone());
             let market_collector = CollectorApp::new(market_config)?.with_event_observer(Arc::new(
                 funding_app::ui::live::SharedLiveUiObserver::new(ui_state),
             ));
             let funding_shutdown = shutdown.clone();
-            let funding_task =
-                tokio::spawn(async move { funding_collector.run(funding_shutdown).await });
+            let funding_task = tokio::spawn(async move {
+                let result = AssertUnwindSafe(funding_collector.run(funding_shutdown))
+                    .catch_unwind()
+                    .await
+                    .unwrap_or_else(|_| Err(anyhow::anyhow!("funding collector task panicked")));
+                set_data_plane_result(
+                    &funding_status_state,
+                    funding_app::ui::live::DataPlane::Funding,
+                    result.is_ok(),
+                );
+                result
+            });
             let market_shutdown = shutdown.clone();
-            let market_task =
-                tokio::spawn(async move { market_collector.run(market_shutdown).await });
+            let market_task = tokio::spawn(async move {
+                let result = AssertUnwindSafe(market_collector.run(market_shutdown))
+                    .catch_unwind()
+                    .await
+                    .unwrap_or_else(|_| {
+                        Err(anyhow::anyhow!("core market collector task panicked"))
+                    });
+                set_data_plane_result(
+                    &market_status_state,
+                    funding_app::ui::live::DataPlane::CoreMarket,
+                    result.is_ok(),
+                );
+                result
+            });
             let ui_result = funding_app::ui::run_live_gui(initial, subscriber, selection);
             shutdown.cancel();
             match funding_task.await {
@@ -123,6 +151,23 @@ async fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(feature = "gui")]
+fn set_data_plane_result(
+    state: &Arc<Mutex<funding_app::ui::live::LiveUiState>>,
+    plane: funding_app::ui::live::DataPlane,
+    succeeded: bool,
+) {
+    let status = if succeeded {
+        funding_app::ui::live::DataPlaneStatus::Stopped
+    } else {
+        funding_app::ui::live::DataPlaneStatus::Failed
+    };
+    state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .set_data_plane_status(plane, status);
 }
 
 fn parse_duration(value: &str) -> Result<Duration, String> {

@@ -2,7 +2,9 @@
 
 use collector::MarketEventObserver;
 use funding_app::ui::bridge::ui_snapshot_channel;
-use funding_app::ui::live::{LiveUiState, MarketSelection, SharedLiveUiObserver};
+use funding_app::ui::live::{
+    DataPlane, DataPlaneStatus, LiveUiState, MarketSelection, SharedLiveUiObserver,
+};
 use funding_app::ui::model::UiSnapshot;
 use funding_core::{
     config::{ExactDecimal, FundingConfig},
@@ -121,6 +123,37 @@ fn live_snapshot_contains_costed_funding_opportunity() {
             .is_some_and(|value| value > 0)
     );
     assert!(row.capacity_usd_micros.is_some());
+
+    state.set_data_plane_status(DataPlane::Funding, DataPlaneStatus::Failed);
+    let failed = subscriber.borrow();
+    let row = failed.opportunities.first().unwrap();
+    assert_eq!(failed.health.public_connections, "FAILED");
+    assert_eq!(failed.health.arrow_status, "FAILED");
+    assert_eq!(row.exclusion.as_deref(), Some("DATA_PLANE_FAILED"));
+    assert_eq!(row.conservative_net_usd_micros, None);
+    assert_eq!(row.capacity_usd_micros, None);
+}
+
+#[test]
+fn data_plane_health_transitions_are_explicit_and_aggregated() {
+    let initial = UiSnapshot::starting();
+    let (publisher, subscriber) = ui_snapshot_channel(initial.clone());
+    let selection = MarketSelection::new("Binance USD-M", "BTC/USDT");
+    let mut state = LiveUiState::new(publisher, initial, selection, cost());
+
+    state.set_data_plane_status(DataPlane::CoreMarket, DataPlaneStatus::Receiving);
+    assert_eq!(subscriber.borrow().health.public_connections, "PARTIAL");
+
+    state.set_data_plane_status(DataPlane::Funding, DataPlaneStatus::Receiving);
+    assert_eq!(subscriber.borrow().health.public_connections, "RECEIVING");
+    assert_eq!(subscriber.borrow().health.arrow_status, "WRITING");
+
+    state.set_data_plane_status(DataPlane::Funding, DataPlaneStatus::Stopped);
+    assert_eq!(subscriber.borrow().health.public_connections, "PARTIAL");
+
+    state.set_data_plane_status(DataPlane::CoreMarket, DataPlaneStatus::Stopped);
+    assert_eq!(subscriber.borrow().health.public_connections, "STOPPED");
+    assert_eq!(subscriber.borrow().health.arrow_status, "STOPPED");
 }
 
 fn cost() -> funding_core::config::CostConfig {

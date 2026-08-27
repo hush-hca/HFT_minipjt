@@ -110,8 +110,10 @@ fn publish_market_ui(hook: &UiHook, event: &NormalizedEvent) {
             return;
         }
         match sink.state.try_lock() {
-            Ok(mut state) => state.market(event),
-            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner().market(event),
+            Ok(mut state) => state.funding_market(event),
+            Err(std::sync::TryLockError::Poisoned(error)) => {
+                error.into_inner().funding_market(event)
+            }
             Err(std::sync::TryLockError::WouldBlock) => {
                 sink.input_drops.fetch_add(1, Ordering::Relaxed);
             }
