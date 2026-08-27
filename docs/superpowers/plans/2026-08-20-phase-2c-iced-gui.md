@@ -14,7 +14,8 @@
 
 - Complete: pinned iced 0.13.1, five-screen read-only shell, immutable snapshot contracts, nonblocking Tokio `watch` bridge, filter/selection reducer, top-20 book display, mid/microprice history, funding rows, system-health surface, disabled execution controls, CLI, Windows release build, workspace tests, and strict Clippy.
 - Live: the GUI consumes both the original four-venue Phase 1 collector and the public Phase 2 funding collector while each continues to its own Arrow output root. Phase 1 is the single GUI source for Binance USD-M market events; Phase 2 contributes Bybit market events and derivatives metadata without double-counting Binance. Every observed venue/symbol has bounded independent book/flow/history state; the GUI snapshot copies only summaries plus the selected market detail. Exact `funding-features` calculations provide mid, microprice, snapshot OFI, 5-second CVD, and conservative funding opportunities. The live evaluator uses causal Binance/Bybit funding and mark evidence, executable depth, announced settlement times, the configured 100 USDT research cap, taker fees, slippage, book impact, and risk buffers. It rejects missing/stale evidence with stable codes, evaluates complete book pairs no more than once per symbol per 250 ms, and sorts eligible rows by conservative net PnL. Derivatives events also feed basis, OI, and venue-specific trader ratios. UI input drops and superseded snapshots are counted, freshness ages at render time, and unavailable net/capacity values render as `—`. Core-market and funding data planes now publish explicit `STARTING`, `PARTIAL`, `RECEIVING`, `STOPPED`, and `FAILED` aggregate states; task errors and panics fail closed by invalidating displayed opportunity net/capacity without exposing error text.
-- Still required for the full Phase 2C gate: detailed presenter modules for execution views and the three-OS CI workflow.
+- CI: `.github/workflows/ci.yml` runs locked format, strict Clippy, workspace tests, and the release `funding-app` GUI build on Windows, macOS, and Linux using the repository's stable Rust toolchain policy. It installs GUI build headers only on Linux and never contacts an exchange or loads credentials. The locked dependency graph currently includes crates with an MSRV above the workspace's declared 1.85 floor, so CI intentionally does not claim Rust 1.85 compatibility.
+- Still required for the full Phase 2C gate: detailed presenter modules for execution views.
 - Safety: this remains read-only. Strategy, order, and risk mutation controls cannot emit an operator command and display `EXECUTION_ENGINE_UNAVAILABLE`.
 
 ## Global Constraints
@@ -413,7 +414,7 @@ Expected: FAIL because the `gui` subcommand is absent.
 
 Start the Phase 2B monitor and snapshot publisher on Tokio. Launch iced with its receiver and a bounded command sender whose Phase 2C implementation always returns `EXECUTION_ENGINE_UNAVAILABLE`. On window close, disarm, cancel the data plane, drain/flush Arrow writers, then write the report. If the data plane fails first, render a fatal health state and keep order controls disabled.
 
-- [ ] **Step 4: Add the cross-platform build matrix**
+- [x] **Step 4: Add the cross-platform build matrix**
 
 Create a GitHub Actions matrix over `windows-latest`, `macos-latest`, and `ubuntu-latest`. Install Linux GUI packages needed by iced, then run format check, strict clippy, workspace tests, and `cargo build -p funding-app --release --features gui` on every OS.
 
