@@ -3,6 +3,8 @@ use std::fs;
 use std::fs::OpenOptions;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
+#[cfg(feature = "gui")]
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -59,7 +61,30 @@ use crate::report::{
 use crate::ui::{bridge::UiSnapshotPublisher, live::LiveUiState, model::UiSnapshot};
 
 #[cfg(feature = "gui")]
-type UiHook = Option<Arc<Mutex<LiveUiState>>>;
+#[derive(Clone)]
+struct UiHookSink {
+    state: Arc<Mutex<LiveUiState>>,
+    input_drops: Arc<AtomicU64>,
+    include_binance_usdm_market: bool,
+}
+
+#[cfg(feature = "gui")]
+impl UiHookSink {
+    fn new(state: Arc<Mutex<LiveUiState>>, include_binance_usdm_market: bool) -> Self {
+        let input_drops = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .input_drop_counter();
+        Self {
+            state,
+            input_drops,
+            include_binance_usdm_market,
+        }
+    }
+}
+
+#[cfg(feature = "gui")]
+type UiHook = Option<UiHookSink>;
 #[cfg(not(feature = "gui"))]
 type UiHook = ();
 
@@ -80,13 +105,23 @@ fn default_ui_hook() -> UiHook {}
 
 #[cfg(feature = "gui")]
 fn publish_market_ui(hook: &UiHook, event: &NormalizedEvent) {
-    if let Some(state) = hook {
-        match state.try_lock() {
+    if let Some(sink) = hook {
+        if !include_market_in_ui(event.meta().adapter, sink.include_binance_usdm_market) {
+            return;
+        }
+        match sink.state.try_lock() {
             Ok(mut state) => state.market(event),
             Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner().market(event),
-            Err(std::sync::TryLockError::WouldBlock) => {}
+            Err(std::sync::TryLockError::WouldBlock) => {
+                sink.input_drops.fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
+}
+
+#[cfg(feature = "gui")]
+fn include_market_in_ui(adapter: AdapterId, include_binance_usdm_market: bool) -> bool {
+    adapter != AdapterId::BinanceUsdm || include_binance_usdm_market
 }
 
 #[cfg(not(feature = "gui"))]
@@ -94,11 +129,13 @@ fn publish_market_ui(_hook: &UiHook, _event: &NormalizedEvent) {}
 
 #[cfg(feature = "gui")]
 fn publish_derivative_ui(hook: &UiHook, event: &DerivativeEvent) {
-    if let Some(state) = hook {
-        match state.try_lock() {
+    if let Some(sink) = hook {
+        match sink.state.try_lock() {
             Ok(mut state) => state.derivative(event),
             Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner().derivative(event),
-            Err(std::sync::TryLockError::WouldBlock) => {}
+            Err(std::sync::TryLockError::WouldBlock) => {
+                sink.input_drops.fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
 }
@@ -229,15 +266,14 @@ impl Phase2Collector {
         initial: UiSnapshot,
     ) -> Self {
         let selection = crate::ui::live::MarketSelection::new("Binance USD-M", "BTC/USDT");
-        self.ui = Some(Arc::new(Mutex::new(LiveUiState::new(
-            publisher, initial, selection,
-        ))));
+        let state = Arc::new(Mutex::new(LiveUiState::new(publisher, initial, selection)));
+        self.ui = Some(UiHookSink::new(state, true));
         self
     }
 
     #[cfg(feature = "gui")]
     pub fn with_ui_state(mut self, state: Arc<Mutex<LiveUiState>>) -> Self {
-        self.ui = Some(state);
+        self.ui = Some(UiHookSink::new(state, false));
         self
     }
 
@@ -2497,6 +2533,15 @@ fn publish_report(temporary: &Path, target: &Path, id: Uuid) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "gui")]
+    #[test]
+    fn combined_gui_uses_phase_one_as_the_single_binance_usdm_market_source() {
+        assert!(!include_market_in_ui(AdapterId::BinanceUsdm, false));
+        assert!(include_market_in_ui(AdapterId::BinanceUsdm, true));
+        assert!(include_market_in_ui(AdapterId::BybitLinear, false));
+        assert!(include_market_in_ui(AdapterId::UpbitSpot, false));
+    }
 
     #[test]
     fn derivative_control_frames_distinguish_success_failure_and_data() {

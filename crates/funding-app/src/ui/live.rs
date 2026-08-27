@@ -1,5 +1,8 @@
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicU64, Ordering},
+};
 use std::time::Instant;
 
 use collector::MarketEventObserver;
@@ -54,11 +57,16 @@ impl MarketSelection {
 
 pub struct SharedLiveUiObserver {
     state: Arc<Mutex<LiveUiState>>,
+    input_drops: Arc<AtomicU64>,
 }
 
 impl SharedLiveUiObserver {
     pub fn new(state: Arc<Mutex<LiveUiState>>) -> Self {
-        Self { state }
+        let input_drops = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .input_drop_counter();
+        Self { state, input_drops }
     }
 }
 
@@ -67,7 +75,9 @@ impl MarketEventObserver for SharedLiveUiObserver {
         match self.state.try_lock() {
             Ok(mut state) => state.market(event),
             Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner().market(event),
-            Err(std::sync::TryLockError::WouldBlock) => {}
+            Err(std::sync::TryLockError::WouldBlock) => {
+                self.input_drops.fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
 }
@@ -127,6 +137,7 @@ pub struct LiveUiState {
     started: Instant,
     market_events: u64,
     derivative_events: u64,
+    input_drops: Arc<AtomicU64>,
 }
 
 impl LiveUiState {
@@ -145,7 +156,12 @@ impl LiveUiState {
             started: Instant::now(),
             market_events: 0,
             derivative_events: 0,
+            input_drops: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    pub(crate) fn input_drop_counter(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.input_drops)
     }
 
     pub fn market(&mut self, event: &NormalizedEvent) {
@@ -239,8 +255,8 @@ impl LiveUiState {
                 long_interval_secs: long.2,
                 raw_gap_ppm: gap_ppm,
                 indicative_apr_bps: apr_bps,
-                conservative_net_usd_micros: 0,
-                capacity_usd_micros: 0,
+                conservative_net_usd_micros: None,
+                capacity_usd_micros: None,
                 freshness_ms: short.3.max(long.3),
                 exclusion: Some("COST_MODEL_PENDING".into()),
             });
@@ -260,6 +276,8 @@ impl LiveUiState {
         self.snapshot.health.features_per_second = self.derivative_events / elapsed;
         self.snapshot.health.public_connections = "RECEIVING".into();
         self.snapshot.health.arrow_status = "WRITING".into();
+        self.snapshot.health.ui_input_drops = self.input_drops.load(Ordering::Relaxed);
+        self.snapshot.health.ui_snapshots_superseded = self.publisher.superseded_count();
         self.publisher.publish(self.snapshot.clone());
     }
 

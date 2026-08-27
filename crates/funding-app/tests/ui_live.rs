@@ -13,15 +13,22 @@ use uuid::Uuid;
 #[test]
 fn observer_does_not_wait_when_the_ui_aggregator_is_busy() {
     let initial = UiSnapshot::demo();
-    let (publisher, _subscriber) = ui_snapshot_channel(initial.clone());
+    let (publisher, subscriber) = ui_snapshot_channel(initial.clone());
     let selection = MarketSelection::new("Binance USD-M", "BTC/USDT");
     let shared = std::sync::Arc::new(std::sync::Mutex::new(LiveUiState::new(
         publisher, initial, selection,
     )));
     let observer = SharedLiveUiObserver::new(shared.clone());
-    let _busy = shared.lock().unwrap();
+    let busy = shared.lock().unwrap();
 
     observer.observe(&book(AdapterId::BinanceUsdm, "USDT"));
+    drop(busy);
+    shared
+        .lock()
+        .unwrap()
+        .market(&book(AdapterId::BybitLinear, "USDT"));
+
+    assert_eq!(subscriber.borrow().health.ui_input_drops, 1);
 }
 
 #[test]
@@ -42,6 +49,7 @@ fn core_venues_are_listed_and_selection_switches_the_detailed_market() {
 
     let snapshot = subscriber.borrow();
     assert_eq!(snapshot.markets.len(), 4);
+    assert!(snapshot.health.ui_snapshots_superseded > 0);
     assert_eq!(snapshot.market.venue, "Binance USD-M");
     assert_eq!(snapshot.market.symbol, "BTC/USDT");
     assert_eq!(snapshot.market.mid_history.len(), 1);

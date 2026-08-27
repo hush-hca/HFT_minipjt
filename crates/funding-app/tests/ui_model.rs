@@ -1,6 +1,6 @@
 #![cfg(feature = "gui")]
 
-use funding_app::ui::model::{ControlAvailability, ModeLabel, UiSnapshot};
+use funding_app::ui::model::{ControlAvailability, ModeLabel, UiSnapshot, decimal};
 
 #[test]
 fn snapshot_has_all_read_only_views_without_secrets() {
@@ -16,4 +16,5 @@ fn snapshot_has_all_read_only_views_without_secrets() {
             if code == "EXECUTION_ENGINE_UNAVAILABLE"
     ));
     assert!(!snapshot.debug_text().contains("API_SECRET"));
+    assert_eq!(decimal(None, 1_000_000, " USD"), "—");
 }

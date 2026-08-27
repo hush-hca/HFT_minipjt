@@ -129,6 +129,7 @@ impl App {
                 fixed("GAP", 110),
                 fixed("APR edge*", 130),
                 fixed("NET / $1k", 140),
+                fixed("CAPACITY", 140),
                 fixed("FRESH", 100),
             ]
             .spacing(8)
@@ -152,6 +153,7 @@ impl App {
                 item.long_interval_secs / 3600
             );
             let exclusion = item.exclusion.as_deref().unwrap_or("eligible");
+            let freshness = freshness_label(item.freshness_ms, self.state.snapshot.generated_at_us);
             rows = rows.push(
                 row![
                     select,
@@ -166,10 +168,11 @@ impl App {
                         130
                     ),
                     fixed(
-                        decimal(Some(item.conservative_net_usd_micros), 1_000_000, " USD"),
+                        decimal(item.conservative_net_usd_micros, 1_000_000, " USD"),
                         140
                     ),
-                    fixed(format!("{} ms · {exclusion}", item.freshness_ms), 180),
+                    fixed(decimal(item.capacity_usd_micros, 1_000_000, " USD"), 140),
+                    fixed(format!("{freshness} · {exclusion}"), 180),
                 ]
                 .spacing(8),
             );
@@ -192,9 +195,10 @@ impl App {
             let selected = self.state.selected_symbol.as_deref() == Some(&item.symbol)
                 && self.state.selected_venue.as_deref() == Some(&item.venue);
             let prefix = if selected { "● " } else { "" };
+            let freshness = freshness_label(item.freshness_ms, self.state.snapshot.generated_at_us);
             let label = format!(
-                "{prefix}{} · {}  B:{} T:{}  {}ms",
-                item.symbol, item.venue, item.book_events, item.trade_events, item.freshness_ms
+                "{prefix}{} · {}  B:{} T:{}  {freshness}",
+                item.symbol, item.venue, item.book_events, item.trade_events
             );
             markets = markets.push(button(text(label)).on_press(Message::SelectMarket {
                 symbol: item.symbol.clone(),
@@ -240,7 +244,10 @@ impl App {
                 "Publication → local",
                 market.latency_us.map_or("—".into(), |v| format!("{v} µs"))
             ),
-            metric("Freshness", format!("{} ms", market.freshness_ms)),
+            metric(
+                "Freshness",
+                freshness_label(market.freshness_ms, self.state.snapshot.generated_at_us)
+            ),
             text("Mid / microprice chart · blue mid · green micro (max 3,600 points)").size(16),
             chart::price_chart(&market.mid_history, &market.micro_history),
         ]
@@ -288,6 +295,11 @@ impl App {
             metric("Reconnects", health.reconnects.to_string()),
             metric("Sequence gaps", health.sequence_gaps.to_string()),
             metric("Backpressure drops", health.backpressure_drops.to_string()),
+            metric("UI input drops", health.ui_input_drops.to_string()),
+            metric(
+                "UI snapshots superseded",
+                health.ui_snapshots_superseded.to_string()
+            ),
             metric("Public connections", health.public_connections.clone()),
             metric("Private connections", health.private_connections.clone()),
             metric("Arrow", health.arrow_status.clone()),
@@ -345,6 +357,30 @@ fn metric<'a>(label: &'a str, value: String) -> Element<'a, Message> {
     row![fixed(label, 190), text(value)].spacing(12).into()
 }
 
+fn freshness_label(base_ms: u64, generated_at_us: i64) -> String {
+    effective_freshness_ms(base_ms, generated_at_us, now_us())
+        .map_or_else(|| "—".into(), |value| format!("{value} ms"))
+}
+
+fn effective_freshness_ms(base_ms: u64, generated_at_us: i64, rendered_at_us: i64) -> Option<u64> {
+    if base_ms == u64::MAX {
+        return None;
+    }
+    if generated_at_us <= 0 {
+        return Some(base_ms);
+    }
+    let elapsed_ms = u64::try_from(rendered_at_us.saturating_sub(generated_at_us).max(0) / 1_000)
+        .unwrap_or(u64::MAX);
+    Some(base_ms.saturating_add(elapsed_ms))
+}
+
+fn now_us() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|value| i64::try_from(value.as_micros()).unwrap_or(i64::MAX))
+        .unwrap_or(1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -361,5 +397,15 @@ mod tests {
             ControlAvailability::Disabled { .. }
         ));
         assert!(!snapshot.debug_text().contains("SECRET"));
+    }
+
+    #[test]
+    fn freshness_keeps_aging_between_data_snapshots() {
+        assert_eq!(
+            effective_freshness_ms(125, 1_000_000, 3_500_000),
+            Some(2_625)
+        );
+        assert_eq!(effective_freshness_ms(u64::MAX, 1, 2), None);
+        assert_eq!(effective_freshness_ms(125, 0, 9_000_000), Some(125));
     }
 }
