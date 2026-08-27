@@ -350,6 +350,7 @@ fn special_binance_funding_and_public_top_trader_use_typed_capabilities() {
 fn binance_legacy_rate_type_and_history_rules_are_explicit() {
     let mut missing = String::from_utf8(fixture("binance_funding_history.json"))
         .unwrap()
+        .replace("\r\n", "\n")
         .replace(",\n    \"rateType\": \"Regular\"", "")
         .into_bytes();
     assert!(matches!(
